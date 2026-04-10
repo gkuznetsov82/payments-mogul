@@ -13,11 +13,22 @@
 ### Already written into numbered specs
 
 - **`00-overview.md`** — Purpose, elevator pitch (Dwarf Fortress of payments vibe), non-goals, glossary placeholder, document map (list format, not tables), conflict rules, implementation lock order. Spec root: `docs/spec/`.
-- **`01-principles.md`** — Sterman-style feedback-first; institutions vs pops; accounting boundary; Markets vs ROW; procgen + curated/data scenarios; legends/burn-in vision; agentic vs global solver (ADR caveat); determinism/audit pointers; planning tool vs game; phasing; employees as possible future pop (one line).
-- **`10-player-journey.md`** — Natural-person player; session loop; RPG traits mid-term; diplomacy/agreements; license-as-agreement with regulator, revocation pivots (BIN sponsor, M&A/sell); VCs/exec/board; employee pops mid/long; Vic3-style “buildings” / outsourcing / reliability long-term; phasing.
+- **`01-principles.md`** — Sterman-style feedback-first; institutions vs pops; accounting boundary; Markets vs ROW; procgen + curated/data scenarios; legends/burn-in vision; agentic vs global solver (ADR caveat); determinism/audit pointers; **wall-clock pacing must not change simulation outcomes**; planning tool vs game; phasing; employees as possible future pop (one line).
+- **`10-player-journey.md`** — Natural-person player; **play modes** (normal vs debug rolling window); **pause / Resume / Next Day / speed**; decisions effective next tick; session loop updated; RPG traits mid-term; diplomacy/agreements; license-as-agreement; VCs/exec/board; employee pops; buildings/outsourcing long-term; phasing.
 - **`11-scenarios.md`** — Scenario types (authored, data-informed, procedural); Markets vs ROW; pointers to architecture/events/config validation; “contents to complete” backlog.
-- **`20-payment-rails.md`** — Contents list + bullet: commercial rails ≠ corporate control; consolidation in `31`/`21`.
-- **`31-agents.md`** — Capitalism Lab–style corporate graph; institution types; person agents; agreements/diplomacy/regulatory license; stances; legal-entity books vs group consolidation; BIN sponsor in-group vs third-party example; M&A long-term; interaction matrix + phasing updates.
+- **`12-ui-ux-spec.md`** — Simulation controls: Pause, Resume, Next Day, speed, debug window; control panel; cross-refs.
+- **`20-payment-rails.md`** — **Daily** time grain; commercial rails ≠ corporate control; consolidation in `31`/`21`; contents still to complete.
+- **`21-fee-economics.md`** — Fees from **aggregate** activity; postings; **intercompany alignment still to complete**; fee taxonomy still to complete.
+- **`30-architecture.md`** — Tick = one day; normal vs debug retention; queryable store for debug history; wall-clock pacing 1×/2×/3×; **Next Day** single-step; pause at tick boundary; determinism.
+- **`31-agents.md`** — Corporate graph; institution types; person agents; **player/AI decisions** (control authority, next-tick effect); agreements/diplomacy/regulatory license; stances; legal-entity books vs consolidation; BIN sponsor example; M&A long-term; interaction matrix + phasing.
+- **`33-transaction-pipeline.md`** — Aggregate intents → fees → transfers → postings; normal EOD vs debug rolling **N** ticks (full bucket log); cross-refs.
+- **`40-yaml-config.md`** — `tick_wall_clock_base_ms`, `debug_history_max_ticks`, validation notes; contents still to complete.
+- **`41-balance-knobs.md`** — Pacing/debug window placeholders; full table still to complete.
+- **`42-fixtures-and-snapshots.md`** — CI compares EOD aggregates; contents still to complete.
+- **`51-api-contract.md`** — Control plane outline (pause, resume, **next day**, speed, debug window, decisions).
+- **`52-realtime-ui-protocol.md`** — Control messages outline including **next day**.
+- **`60-screen-specs.md`** — Simulation shell bullets; contents still to complete.
+- **`71-implementation-roadmap.md`** — Phase 0 line expanded (tick, modes, pause/Resume/Next Day, pacing, debug store); phases still loose.
 
 ### Typo / style hygiene (optional)
 
@@ -30,10 +41,8 @@
 
 ### Transaction backbone and logging
 
-- Ticks produce **aggregate transaction intents** (pop slice × counterparty institutions × key dimensions), not individual cardholders. These drive **fees, fraud, BS movements, P&L**.
-- **Tiered observability:** (1) always tick/GL summaries for UI and scoring; (2) often per-tick aggregate bucket log or sketch; (3) debug: embedded DB / Parquet for full trail; (4) perf mode: trim storage.
-- Consider **posting-first** vs **transaction-as-object**; **replay** (seed + inputs vs log); **drill-down** P&L → posting → bucket; **retention windows**; **per-tick checksum** for reproducibility.
-- **Target files when editing:** `33-transaction-pipeline.md`, `30-architecture.md`, `23-metrics-kpis.md`, `42-fixtures-and-snapshots.md`; optional principle line in `01`.
+- **Partially incorporated** into **`30`**, **`33`**, **`42`**, **`01`** (see “Already written” above): tick = day; normal EOD summaries vs debug rolling **N** with queryable store; aggregate intents; CI on EOD aggregates.
+- **Still open for future spec work:** posting-first vs transaction-as-object; replay; drill-down chains; **per-tick checksum**; perf trim mode; full **`23-metrics-kpis.md`** snapshot schema.
 
 ### Scale assumptions (user machine as dev baseline)
 
@@ -44,7 +53,7 @@
 ### Phase 0 / vertical slice strategy
 
 - Lock **one** end-to-end path in spec before or parallel to MVP: single scenario spine, minimal `20`–`23`, `30`+`33`, stub `40`, stub `51`/`60`.
-- **`71-implementation-roadmap.md`** should get an explicit Phase 0 “done” checklist.
+- **`71-implementation-roadmap.md`** still needs an explicit Phase 0 **“done” checklist** (one-liner exists, not exit criteria).
 - **`11-scenarios.md`** should eventually name **one concrete starter scenario** (player role, one Market, ROW, end condition).
 
 ### Fee economics gap
@@ -70,3 +79,25 @@
 - Relatable games for inspiration: V3, Capitalism Lab, DF, OpenTTD, Democracy 4, Offworld Trading Company, etc. (design reference only.)
 - Victoria 3–scale team: ballpark **~100** in credits (all roles), studio ~**150** at one point—not a precise “V3 dev count.”
 - Claude/Cursor **Phase 0** wall-clock: often **hours** to first runnable skeleton, **~0.5–2 days** calendar for something you’d build on—with human review and iteration.
+
+---
+
+## Session log — 2026-04-08
+
+### Committed to numbered specs (this session)
+
+- **Transaction aggregation / storage:** `30`, `33`, `10`, `12`, `20`, `21`, `31`, `40`, `41`, `42`, `51`, `52`, `60`, `71`, plus **`01`** (pacing vs determinism). Normal play keeps **EOD summaries**; debug keeps rolling **N** ticks of **full aggregate/bucket** history in a **queryable** store; caps in config.
+- **Controls:** **Pause** (end of tick), **Resume** (continuous with **1×/2×/3×** between ticks), **Next Day** (single tick while paused, then paused again). API/realtime outlines updated.
+- **Decisions:** Effective **next executed tick** (Next Day or Resume); control graph authority unchanged in substance, wording aligned.
+
+### Discussed; not yet written into numbered specs (next session / backlog)
+
+- **Generic fee & rails engine:** No hardcoded interchange/MDR in core logic—**scenario templates** and validation; optional **code modules** for optimization, **configuration remains driver**.
+- **Transaction-intent families (conceptual):** (1) establish relationship, (2) change relationship / share-of-wallet weights, (3) drop relationship, (4) **transact** (richest; **product** as entity joining pop type + institution).
+- **Pops:** **Needs** (optional vs mandatory per tick); acquire/use products; **preference** granularity—keep bounded; per–**pop type** logic; scenario seeds for starting configs.
+- **Accrual vs cash:** P&L/recognition vs **delayed fund transfers** per rails; receivables before cash; **cashflow** and prefunding as gameplay; staged auth → clearing → settlement; **working days / calendars** (start single calendar, architecture for **multiple** later; holidays, T+n, both legs business day; contrast instant 24×7 rails).
+- **Suggested phasing when writing spec:** config-first fees/rails + one calendar + simple transact slice → relationship intents → richer transact → multi-calendar stress.
+
+### Resume prompt (paste in a new chat)
+
+> Read `docs/spec/SESSION-NOTED.md` and continue from the **Session log — 2026-04-08** backlog: generic config-driven fees/rails, four intent types, pops needs/products, accrual vs cash and calendars—promote into `20`, `21`, `33`, `31`, `11`, `40` as appropriate.
