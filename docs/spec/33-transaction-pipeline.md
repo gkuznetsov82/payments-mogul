@@ -4,11 +4,42 @@
 
 ## Purpose
 
-Simplified transaction lifecycle from intent to economic outcome in the ledger.
+How **aggregate transaction activity** within a simulated **day** (one **tick**) becomes **fees**, **fund transfers**, and **ledger postings**; what is **stored** in **normal** vs **debug** play; and how this ties to UI and reporting.
 
-## Contents (to complete)
+**Cross-references:** tick = one day, pause, modes **`30-architecture.md`**; fee rules **`21-fee-economics.md`**; rails and settlement **`20-payment-rails.md`**; institutions and sinks **`01-principles.md`**, **`31-agents.md`**; realtime payloads **`52-realtime-ui-protocol.md`**; config caps **`40-yaml-config.md`**.
 
-- Stages: authorization, clearing, settlement (as modeled)
-- Decline reasons and propagation
-- Impact on volume, fees, and risk metrics
-- Data emitted for UI/charts per stage
+---
+
+## What gets simulated (all modes)
+
+- **Within a tick**, the engine materializes **aggregate transaction intents** (e.g. pop slice × counterparty institutions × key dimensions—not individual cardholder-level rows unless a scenario explicitly requires that granularity). These intents drive:
+  - **Fee calculations** per **`21-fee-economics.md`** (and scenario knobs).
+  - **Fund transfers** and settlement semantics per **`20-payment-rails.md`**.
+  - **Aggregated accounting postings** to the **P&L and balance sheet** of relevant **institutions** and to **pop sinks** where the model attributes flows (**`01-principles.md`**).
+- **Economic rules do not change** between normal and debug mode; only **retention and inspectability** change (**`30-architecture.md`**).
+
+---
+
+## Normal play-through (storage)
+
+- After each tick, persist **end-of-day summary data** sufficient for **statistics**, **reports**, and **KPIs** (**`23-metrics-kpis.md`**): aggregates, closing ledger balances, and scenario-facing counters—not a full durable **per-bucket transaction log** for the entire campaign history unless a separate product requirement is added later.
+
+---
+
+## Debug play-through (rolling window)
+
+- The user configures a **rolling window** of **N ticks** (simulated days). For ticks inside the window, retain a **full per-aggregate / per-bucket log** for that day (Option A: complete bucket-level detail for the dimensions the engine uses—not a statistical sample). Ticks older than **N** **expire** from the detailed store as the simulation advances.
+- **N** is **capped** by configuration (**`40-yaml-config.md`**) to protect resources.
+- Detailed history should live in a **queryable persistence layer** (e.g. embedded relational store—**`30-architecture.md`**) so debug UIs can query by institution, bucket, time range, and fee line without scanning flat files.
+
+---
+
+## Data for UI and charts
+
+- The pipeline defines what **per-tick** and **per-stage** signals exist for **dashboards** and **drill-down** in debug mode; **throttling and coalescing** for realtime delivery **`52-realtime-ui-protocol.md`**.
+
+---
+
+## Contents still to detail (later)
+
+- Named stages (authorization, clearing, settlement) as implemented in v1; decline reasons and propagation; failure modes vs P&L; exact bucket dimension list per scenario profile.

@@ -4,7 +4,17 @@
 
 ## Purpose
 
-Domain model of the 4-party (and extended) payment network as implemented in the sim.
+Domain model of the 4-party (and extended) payment network as implemented in the sim: who moves value, when, and how that ties to **daily** aggregate simulation.
+
+**Cross-references:** pipeline and tick aggregation **`33-transaction-pipeline.md`**; fees **`21-fee-economics.md`**; corporate graph **`31-agents.md`**.
+
+---
+
+## Time grain
+
+- **Fund transfers and settlement** semantics apply to activity **within a simulated day** (one **tick**). The pipeline resolves how intra-day stages roll up to **postings** for that day (**`33-transaction-pipeline.md`**).
+
+---
 
 ## Contents (to complete)
 

@@ -69,7 +69,7 @@ Institutions should **interact through rules, schedules, and limited information
 
 ## Determinism, explainability, auditability
 
-Runs with the same **seed and configuration** should yield the same trajectory under the **determinism policy** defined in **`30-architecture.md`**. Users and implementers should be able to trace **why** balances moved: postings link to mechanisms (pipeline, events, agent actions) described in **`33-transaction-pipeline.md`**, **`34-events-scheduler.md`**, and **`31-agents.md`**.
+Runs with the same **seed and configuration** should yield the same trajectory under the **determinism policy** defined in **`30-architecture.md`**. **Wall-clock pacing** (including pause and speed multipliers) must **not** change simulation outcomes—only when the clock advances. Users and implementers should be able to trace **why** balances moved: postings link to mechanisms (pipeline, events, agent actions) described in **`33-transaction-pipeline.md`**, **`34-events-scheduler.md`**, and **`31-agents.md`**.
 
 ---
 

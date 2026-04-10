@@ -6,7 +6,23 @@
 
 Session and meta-loop: **who the player is** (natural-person representation), how a run progresses from **character creation → world/scenario start → decisions → ticks → reports**, and how **difficulty, scoring, and long-term systems** (traits, diplomacy, capital stock) phase in over time.
 
-**Cross-references:** principles and pops vs institutions **`01-principles.md`**; institution and **person** agents, agreements **`31-agents.md`**; scenario entry **`11-scenarios.md`**; regulatory events **`22-regulatory-pressure.md`**; KPIs and scoreboard **`23-metrics-kpis.md`**; shocks and audits **`34-events-scheduler.md`**.
+**Cross-references:** principles and pops vs institutions **`01-principles.md`**; institution and **person** agents, agreements, control authority **`31-agents.md`**; scenario entry **`11-scenarios.md`**; regulatory events **`22-regulatory-pressure.md`**; KPIs and scoreboard **`23-metrics-kpis.md`**; shocks and audits **`34-events-scheduler.md`**; tick, pause, pacing **`30-architecture.md`**; pipeline and retention **`33-transaction-pipeline.md`**; realtime control **`52-realtime-ui-protocol.md`**.
+
+---
+
+## Play modes, pause, and simulation speed
+
+- **Normal play-through** — After each simulated day (**tick**), only **end-of-day summary** state is retained for long-run statistics (**`33-transaction-pipeline.md`**, **`30-architecture.md`**).
+- **Debug play-through** — The user sets a **rolling window** (number of ticks) for which **full aggregate/bucket transaction history** is kept for inspection; window size is **capped** in config (**`40-yaml-config.md`**). Detailed retention uses a **queryable store** (**`30-architecture.md`**).
+- **Pause** — When the user presses **pause**, the run **always** completes the **current tick** first, then stops. There is no pause mid-tick.
+- **Resume** — From **paused**, runs **continuously** tick after tick until **pause** again; **1× / 2× / 3×** set wall-clock **spacing** between ticks (**`30-architecture.md`**, **`12-ui-ux-spec.md`**).
+- **Next Day** — While **paused**, advances **exactly one tick** (one simulated day), then **stays paused**. Use for step-by-step play. **Speed** multipliers do not apply to **Next Day** (**`30-architecture.md`**, **`12-ui-ux-spec.md`**).
+- **While paused**, the user may inspect state and open the **control panel** for entities they are authorized to steer (**`31-agents.md`**). **Any decision taken applies starting the next tick** that the **engine runs**—whether after **Next Day** or after **Resume** (decisions do not retroactively change the completed tick).
+- **Simulation speed** — **Normal (1×)**, **2×**, and **3×** adjust wall-clock **wait** **between** ticks in **continuous** mode only, relative to a **configurable** base interval (**`30-architecture.md`**). Simulation outcomes must **not** depend on speed or wall time.
+
+### Mid-term: unattended and scheduled actions
+
+- **Later**, players may **schedule** decisions or policy changes to take effect on **future ticks** so runs can proceed without constant attention. Scheduling belongs with **`34-events-scheduler.md`** and agent/decision contracts **`31-agents.md`**; early versions may require **manual** decisions each time the player unpauses.
 
 ---
 
@@ -27,10 +43,11 @@ This identity anchors **role-play**, **diplomacy**, and later **trait** systems.
 
 1. **Create or load** player profile and scenario.
 2. **World / scenario start** — Resolved markets, institutions, pops, and initial books (authored, procedural, or hybrid per **`11-scenarios.md`**).
-3. **Decision phases** — Player sets policies, pricing, hiring (when modeled), agreements (when unlocked), and responses to prompts between ticks or on a schedule (exact UX in **`12-ui-ux-spec.md`**).
-4. **Tick advance** — Simulation updates volumes, ledgers, events, and AI institution actions.
-5. **Reports** — P&L, KPIs, alerts, narrative log; optional drill-down (**`23-metrics-kpis.md`**).
-6. **End condition or save** — Scenario goal, bankruptcy, time limit, or player exit; **save/load** and run history for comparison runs.
+3. **Optional: configure debug window** — If in debug mode, set rolling history length (capped—**`40-yaml-config.md`**).
+4. **Decision input (between ticks)** — While paused or between tick advances in continuous play, the player may set policies for the next tick within their **control authority** (**`31-agents.md`**). **Effective timing:** decisions apply **starting the next tick** the engine executes (**Next Day** or **Resume** path—**`30-architecture.md`**). Mid-term **scheduled** actions may automate this (**`34-events-scheduler.md`**).
+5. **Tick advance** — One **simulated day**: volumes, pipeline, fees, transfers, postings, events, AI actions (**`33-transaction-pipeline.md`**, **`30-architecture.md`**). Invoked by **Next Day** (single step) or **Resume** (repeat until pause).
+6. **Reports** — P&L, KPIs, alerts, narrative log; optional drill-down (**`23-metrics-kpis.md`**); in debug mode, query **bucket-level** history within the rolling window.
+7. **End condition or save** — Scenario goal, bankruptcy, time limit, or player exit; **save/load** and run history for comparison runs.
 
 _To complete:_ explicit **win / lose / score** rules per scenario template; **difficulty knobs** (starting capital, AI aggression, regulatory strictness).
 

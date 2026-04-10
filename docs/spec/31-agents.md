@@ -51,6 +51,25 @@ Each institution is typically a **legal entity** with its own **books** in the s
 
 ---
 
+## Player and AI decisions (control authority and tick boundary)
+
+### Who may decide what
+
+- **Operational and strategic decisions** (e.g. **pricing**, **cashback / rewards**, **risk policy**, **marketing campaigns**, **termination or exclusion of user or merchant categories**, **re-routing** among available **payment rails**) are **scoped** by:
+  - The **corporate control graph** (ownership, voting control, and scenario-defined **operating authority**), and
+  - **Scenario allowlists** in early versions (**hardcoded** per scenario) expanding to full **validation** rules later (**`50-validation-rules.md`**).
+- The **player** may only issue decisions for institutions (or units) they **control** under that graph; **AI institutions** follow their behavior contracts in **`31`** and scenario config.
+
+### When decisions take effect
+
+- Decisions are submitted from the **control panel** while **paused** or during **between-tick** intervals in **continuous** play (**`10-player-journey.md`**, **`12-ui-ux-spec.md`**). They **always take effect starting the next simulated tick** (next simulated day) that the engine runs—after **Next Day** or when **Resume** advances the clock—**never** retroactively altering the tick that just completed.
+
+### Mid-term: scheduled and unattended actions
+
+- **Later**, the same decision types may be **scheduled** for future ticks (e.g. marketing start date, rail migration) so simulations can run **unattended**; scheduling and triggers **`34-events-scheduler.md`**, payloads and validation **`50-validation-rules.md`**.
+
+---
+
 ## Agreements, diplomacy, and regulatory licenses
 
 **Diplomacy** (game-facing term) means **negotiated relationships and contracts** between institutions (and, where modeled, key persons as representatives).
