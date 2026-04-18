@@ -101,3 +101,141 @@
 ### Resume prompt (paste in a new chat)
 
 > Read `docs/spec/SESSION-NOTED.md` and continue from the **Session log — 2026-04-08** backlog: generic config-driven fees/rails, four intent types, pops needs/products, accrual vs cash and calendars—promote into `20`, `21`, `33`, `31`, `11`, `40` as appropriate.
+
+---
+
+## Session log — 2026-04-16 (notes archive addendum)
+
+### Cost perception and information asymmetry
+
+- Added concept: product choice is driven by **perceived** cost, not true cost, especially pre-usage.
+- Proposed model:
+  - **Marketing Rate (`C_m`)**: public sticker claim used in scan/compare.
+  - **Realized Friction (`C_r`)**: true effective cost borne after usage.
+  - **Perceived Cost Index (`PCI`)**: pop belief, dynamic and pop-specific.
+- Experience loop:
+  - Onboarding starts with `PCI = C_m`.
+  - During usage, each tick computes `delta = C_r - PCI`.
+  - Discovery updates `PCI` toward `C_r` with probability based on pop attention/literacy.
+  - If `PCI` crosses tolerance threshold, pop enters re-evaluation flow.
+- Not all users notice true cost:
+  - Attention sensitivity varies by segment.
+  - Even without exact fee discovery, cumulative dissatisfaction can raise switching propensity.
+- Potential management lever:
+  - Pricing disclosure/obfuscation projects may reduce discovery rate.
+  - Tradeoff: higher regulatory pressure and consumer-protection downside if audited.
+- Open mechanic question captured: discovery mainly driven by **usage time**, **events/news**, or combined trigger.
+
+### Risk and architecture continuity notes
+
+- Reinforced doctrine captured in prior notes:
+  - Agents act only within their authority/capability.
+  - Dual-entry/accounting-first structure remains core.
+  - Aggregate logs and balance-sheet-derived stats remain preferred implementation backbone.
+- Human architecture remains a strategic layer:
+  - Role-specific leadership/capability upgrades (e.g., risk leadership) should materially affect subsystem efficiency.
+
+### Mapping candidates into numbered specs (backlog)
+
+- `31-agents.md`:
+  - Pop attributes for `attention` / `financial_literacy` / tolerance.
+  - Product-side state hooks for perceived vs realized cost update path.
+- `33-transaction-pipeline.md`:
+  - Aggregate cost realization signals that feed `PCI` update each tick (without per-transaction simulation).
+- `22-regulatory-pressure.md`:
+  - Consumer-protection exposure from persistent information asymmetry.
+- `41-balance-knobs.md`:
+  - Tuneables for discovery probability, dissatisfaction accumulation, tolerance thresholds.
+- `11-scenarios.md`:
+  - Scenario-level assumptions for market-wide disclosure norms and consumer sensitivity.
+
+---
+
+## Shutdown handoff — 2026-04-16
+
+### Session outcomes saved
+
+- Unstructured notes ingestion is now feasible via exported PDFs in `docs/spec/unstructured-notes/`.
+- Architecture-first synthesis plan was created and stored at:
+  - `c:\Users\grigo\.cursor\plans\architecture-first_synthesis_roadmap_34d62d5a.plan.md`
+- Notes archive updated with:
+  - Cost perception asymmetry model (`C_m`, `C_r`, `PCI`)
+  - Discovery/attention dynamics and regulatory implications
+  - Mapping targets across numbered specs
+
+### Current source artifacts to preserve context
+
+- `docs/spec/unstructured-notes/GK Notes 2026-04-15.pdf`
+- `docs/spec/unstructured-notes/Gemini Notes 2026-04-13.pdf`
+- `docs/spec/SESSION-NOTED.md`
+- `c:\Users\grigo\.cursor\plans\architecture-first_synthesis_roadmap_34d62d5a.plan.md`
+
+### Recommended first actions on next startup
+
+1. Read the architecture-first plan file above.
+2. Read latest addenda in `SESSION-NOTED.md` (2026-04-16 sections).
+3. Promote backlog items into numbered specs in this order:
+   - `30-architecture.md`
+   - `31-agents.md`
+   - `33-transaction-pipeline.md`
+   - `22-regulatory-pressure.md`
+   - `41-balance-knobs.md`
+   - `11-scenarios.md`
+4. Keep `SESSION-NOTED.md` as context only (not authoritative spec).
+
+### Resume prompt (copy for next chat)
+
+> Read `docs/spec/SESSION-NOTED.md` (including 2026-04-16 sections) and the plan at `c:\Users\grigo\.cursor\plans\architecture-first_synthesis_roadmap_34d62d5a.plan.md`. Continue architecture-first consolidation of numbered specs, preserving all ideas from the two unstructured PDF notes while prioritizing a clean first vertical slice.
+
+---
+
+## Shutdown handoff — 2026-04-16 (multiplayer addendum)
+
+### Multiplayer architecture decisions captured
+
+- New plan created for multiplayer foundations:
+  - `c:\Users\grigo\.cursor\plans\multiplayer_foundation_architecture_39b46b1b.plan.md`
+- Guiding decision:
+  - One deterministic, server-authoritative simulation core.
+  - Launch first in session-based synchronous mode.
+  - Support async/persistent later via policy/config layer, not engine rewrite.
+
+### Tick-processing contract (agreed direction)
+
+- Wall-clock tick uses phased cycle:
+  - command intake window
+  - cutoff/lock window
+  - deterministic simulation + commit
+  - broadcast + next tick open
+- Late commands are routed to next tick only.
+- Commands use effective-tick semantics (no mid-tick direct state mutation).
+
+### Control-plane/API governance requirements
+
+- Separate business command channel from simulation control channel.
+- Core event stream should include lifecycle events:
+  - `tick_opened`
+  - `tick_cutoff_reached`
+  - `tick_committed`
+  - `tick_paused`
+  - `tick_resumed`
+- Session policy must define pause/vote behavior for multiplayer:
+  - proposer/voter eligibility
+  - quorum rule
+  - vote TTL
+  - pause duration limits
+  - cooldowns
+  - host override scope
+- Host/server-console controls should be policy-bound and auditable.
+
+### Suggested placement into numbered specs (next pass)
+
+- `30-architecture.md`: tick barrier, commit phases, deterministic ordering, clock/pause policies.
+- `51-api-contract.md`: command envelope, effective-tick and idempotency semantics, control actions.
+- `52-realtime-ui-protocol.md`: tick/vote lifecycle events and reconnect semantics.
+- `34-events-scheduler.md`: timing rules for events relative to tick barrier.
+- `71-implementation-roadmap.md`: multiplayer phase gates and explicit phase-1 scope.
+
+### Resume prompt (copy for next chat)
+
+> Read `docs/spec/SESSION-NOTED.md` (including both 2026-04-16 shutdown sections) plus plans at `c:\Users\grigo\.cursor\plans\architecture-first_synthesis_roadmap_34d62d5a.plan.md` and `c:\Users\grigo\.cursor\plans\multiplayer_foundation_architecture_39b46b1b.plan.md`. Continue with architecture-first spec consolidation, then draft API/tick lifecycle schemas for multiplayer control and pause voting.

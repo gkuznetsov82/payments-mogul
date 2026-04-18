@@ -20,7 +20,18 @@
       "Bash(echo \"deb [arch=$\\(dpkg --print-architecture\\) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\")",
       "Bash(sudo tee:*)",
       "Bash(git -C /mnt/c/Users/grigo/PaymentsMogul status)",
-      "Bash(git -C /mnt/c/Users/grigo/PaymentsMogul log --oneline)"
+      "Bash(git -C /mnt/c/Users/grigo/PaymentsMogul log --oneline)",
+      "Bash(npm --version)",
+      "Bash(pip list *)",
+      "Bash(python *)",
+      "Bash(.venv/Scripts/python -m pip install -r requirements.txt)",
+      "Bash(npm create *)",
+      "Bash(npm install *)",
+      "Bash(.venv/Scripts/python -c \"import mesa; import fastapi; import pydantic; import uvicorn; import numpy; import pandas; import scipy; print\\('All Python packages OK'\\)\")",
+      "Bash(.venv/Scripts/pip install *)",
+      "Bash(node -e \"const pkg=require\\('./package.json'\\); const deps={...pkg.dependencies,...pkg.devDependencies}; ['react','tailwindcss','recharts','vite'].forEach\\(p=>console.log\\(p, deps[p]||'MISSING'\\)\\)\")",
+      "Bash(.venv/Scripts/pip show *)",
+      "Bash(.venv/Scripts/python -c \"import httpx; import textual; import websockets; import sseclient; print\\('httpx', httpx.__version__\\); print\\('textual', textual.__version__\\); print\\('websockets', websockets.__version__\\); print\\('sseclient OK'\\)\")"
     ]
   }
 }

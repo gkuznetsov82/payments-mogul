@@ -1,0 +1,25 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Editors / tools
+.claude/settings.local.json
+.cursor/
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
