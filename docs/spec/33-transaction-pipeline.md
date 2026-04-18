@@ -40,6 +40,37 @@ How **aggregate transaction activity** within a simulated **day** (one **tick**)
 
 ---
 
+## Prototype v1 pipeline subset (agent-owned flow)
+
+For `prototype_vendor_pop_v1`, pipeline execution starts only **after** `tick_user_inputs_processed` is complete for tick `T` (**`30-architecture.md`**).
+
+### Stage order for tick `T` (fixed)
+
+1. **Pop onboarding requests** generated during `Pop.Onboard()`.
+2. **Vendor/Product onboarding decisions** (accept/reject) via vendor-owned methods.
+3. **Pop transact requests** generated during `Pop.Transact()`.
+4. **Vendor/Product transact decisions** (success/failure) via vendor-owned methods.
+
+This preserves the principle that each agent executes its own logic; external APIs do not execute counterpart transaction actions directly.
+
+### Minimal outputs required for the prototype
+
+- **Action outcomes** for each request/decision path (`accepted`, `rejected`, `success`, `failure` with reason code).
+- **Aggregate counters** at tick close:
+  - onboard requested / accepted / rejected
+  - transact requested / succeeded / failed
+  - successful transact amount total
+- **Minimal posting placeholder** for successful transact:
+  - one simplified posting entry (amount and counterpart identifiers) for integration-test assertions.
+
+### Deferred in this slice
+
+- Full fee taxonomy and line-item decomposition.
+- Deep clearing/settlement stage modeling by rail.
+- Rich decline hierarchies beyond basic reason codes.
+
+---
+
 ## Contents still to detail (later)
 
 - Named stages (authorization, clearing, settlement) as implemented in v1; decline reasons and propagation; failure modes vs P&L; exact bucket dimension list per scenario profile.

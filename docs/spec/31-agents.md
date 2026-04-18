@@ -39,6 +39,138 @@ Each institution is typically a **legal entity** with its own **books** in the s
 
 ---
 
+## Prototype v1 minimal agent contracts (Vendor + Pop)
+
+This subsection defines the **minimum authoritative contracts** for `prototype_vendor_pop_v1` (**`11-scenarios.md`**). It intentionally excludes broader governance, diplomacy, and multi-entity strategy.
+
+### Contract conventions (prototype section)
+
+- Field and method identifiers are written in monospace.
+- All classes in this slice expose `Onboard()` and `Transact()` tick entrypoints.
+- Engine method order per tick is fixed: `Onboard()` on all agents, then `Transact()` on all agents (**`30-architecture.md`**).
+- External/API commands update control state only; they do not directly execute counterpart transaction actions.
+
+### `VendorAgent` (prototype profile)
+
+#### Properties
+
+- `vendor_id` (`string`) - Stable identifier.
+- `vendor_label` (`string`) - Human-readable label for logs/UI.
+- `products` (`map<string, GenericProduct>`) - Product registry owned by this vendor, keyed by `product_id`.
+- `operational` (`bool`) - High-level gate; if `false`, request handlers reject.
+
+#### Methods
+
+- `Onboard()` - Tick entrypoint. May be noop for this class.
+- `Transact()` - Tick entrypoint. May be noop for this class.
+- `HandleOnboardFromPop(pop_id, product_id, requested_pop_count)` - Routes pop onboarding request to owned product handler.
+- `HandleTransactFromPop(pop_id, product_id, requested_pop_count, requested_txn_count, requested_total_amount)` - Routes pop transact request to owned product handler.
+
+#### Request-handler contract
+
+- Vendor validates ownership (`product_id` belongs to `products`) and `operational == true`.
+- Vendor delegates decision to product methods.
+- Vendor returns normalized result payloads with counts/reason codes.
+
+### `GenericProduct` (prototype profile)
+
+#### Properties
+
+- `product_id` (`string`) - Stable identifier.
+- `product_label` (`string`) - Human-readable label.
+- `owner_vendor_id` (`string`) - Owning `VendorAgent` id.
+- `accepting_onboard` (`bool`) - Gate checked during onboarding decisions.
+- `accepting_transact` (`bool`) - Gate checked during transact decisions.
+- `onboarded_pop_count` (`number`) - Aggregate stock currently onboarded to this product.
+- `successful_transact_count` (`number`) - Aggregate successful transaction count.
+- `successful_transact_amount` (`number`) - Aggregate successful transaction amount.
+- `last_action_result` (`object|null`) - Last decision summary emitted by this product.
+
+#### Control methods (applied from intake commands)
+
+- `CloseOnboarding()` - Sets `accepting_onboard = false`.
+- `OpenOnboarding()` - Sets `accepting_onboard = true`.
+- `CloseTransacting()` - Sets `accepting_transact = false`.
+- `OpenTransacting()` - Sets `accepting_transact = true`.
+
+Control methods are applied during `tick_user_inputs_processed` for the target tick (**`30-architecture.md`**, **`51-api-contract.md`**).
+
+#### Decision methods (owner-internal)
+
+- `OnboardProduct(pop_id, requested_pop_count)` -> `OnboardDecisionResult`
+  - Checks `accepting_onboard`.
+  - Returns accepted/rejected counts and reason code.
+  - Increments `onboarded_pop_count` by accepted count.
+- `TransactProduct(pop_id, requested_pop_count, requested_txn_count, requested_total_amount)` -> `TransactDecisionResult`
+  - Checks `accepting_transact`.
+  - Checks `requested_pop_count` against onboarded availability for the pop segment.
+  - Returns success/failure counts and amounts with reason code.
+  - Increments successful counters/amounts.
+
+#### Result payload shapes (normalized)
+
+- `OnboardDecisionResult`:
+  - `accepted_pop_count` (`number`)
+  - `rejected_pop_count` (`number`)
+- `TransactDecisionResult`:
+  - `successful_txn_count` (`number`)
+  - `failed_txn_count` (`number`)
+  - `successful_total_amount` (`number`)
+  - `failed_total_amount` (`number`)
+
+### `RetailPayment-Card-Prepaid` (extends `GenericProduct`)
+
+#### Additional properties
+
+- `onboarding_friction` (`range<float>`) - Per-tick conversion friction on requested onboarding population.
+- `transaction_friction` (`range<float>`) - Per-tick decline friction on requested transaction flow.
+
+`GenericProduct` accepts all valid requests under gate checks, while this subclass applies friction to reduce acceptance/success outcomes.
+
+### `GenericPop` (prototype profile)
+
+Pops are stock-flow objects representing aggregated segment mass, not individual persons.
+
+#### Properties
+
+- `pop_id` (`string`) - Stable identifier.
+- `pop_label` (`string`) - Human-readable label.
+- `pop_count` (`number`) - Total population stock in this segment.
+- `products` (`map<vendor_id, map<product_id, ProductLinkState>>`) - Relationship graph to known products.
+  - `ProductLinkState.known` (`bool`) - Whether this pop evaluates the product for onboarding/transacting.
+  - `ProductLinkState.onboarded_count` (`number`) - Segment mass currently onboarded to this vendor/product pair.
+- `daily_onboard` (`float`) - Share of `pop_count` attempting onboarding per tick.
+- `daily_active` (`float`) - Share of onboarded population attempting activity per tick.
+- `daily_transact_count` (`number`) - Requested transaction count per active population unit.
+- `daily_transact_amount` (`number`) - Requested total amount per active population unit.
+
+#### Methods
+
+- `Onboard()` - Pop-owned onboarding request generation.
+  - Iterates known vendor/product links.
+  - Computes requested onboarding mass from `daily_onboard`.
+  - Calls `VendorAgent.HandleOnboardFromPop(...)`.
+  - Updates `ProductLinkState.onboarded_count` with accepted result.
+- `Transact()` - Pop-owned transact request generation.
+  - Iterates known links with non-zero onboarded stock.
+  - Computes requested transacting population and transaction flow from `daily_active`, `daily_transact_count`, `daily_transact_amount`.
+  - Calls `VendorAgent.HandleTransactFromPop(...)`.
+  - Records outcome summaries for diagnostics/realtime.
+
+### External command boundary (prototype)
+
+- User/API commands in intake windows may modify control state (for example `CloseOnboarding(vendor_id, product_id)`).
+- External commands do **not** call `OnboardProduct()` / `TransactProduct()` directly.
+- Agent-owned execution path:
+  - pops request through `Onboard()` / `Transact()`,
+  - vendor/product entities adjudicate through their own methods.
+
+### Prototype scope boundary
+
+For this slice, command authority is limited to accepting valid control commands and enforcing preconditions above. Person traits, diplomacy, board effects, and broader corporate authority logic remain out of scope.
+
+---
+
 ## Person agents (player and NPCs)
 
 **Person agents** are **finite**, named actors (the **player character**, **VCs**, **shareholders**, **prominent executives**, board figures). They are **not** pops: they interact through **events, agreements, and governance**, not as millions of identical units.

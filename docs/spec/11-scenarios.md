@@ -31,6 +31,30 @@ Scenario YAML (or equivalent) should make **market boundaries and ROW linkage** 
 
 ---
 
+## Prototype starter scenario (vertical slice)
+
+For the bare-bones server/client/API prototype, define one canonical scenario profile:
+
+- **Scenario id:** `prototype_vendor_pop_v1`
+- **Intent:** Validate end-to-end command flow and realtime state updates with minimal simulation complexity.
+- **World shape:**
+  - Exactly **one** `VendorAgent` who has **one** `Product` of type `RetailPayment-Card-Prepaid`
+  - Exactly **one** `Pop` segment
+  - `MAL` instance with which all `Pop` starts as onboarded 
+  - No additional institutions required beyond optional placeholder environment defaults
+- **Deterministic initialization:**
+  - Fixed scenario seed (single default seed value for test fixtures)
+  - Stable generated identifiers for vendor and pop in this scenario profile
+- **Initial action state:**
+  - Pop starts as **not onboarded** to the vendor
+  - Vendor starts as **accepting onboarding** and **accepting transact actions**
+- **Prototype completion condition (scenario-local):**
+  - At least one successful `Onboard` outcome and at least one successful `Transact` outcome are observed in committed ticks.
+
+All richer scenario variety (multiple vendors/pops, competitive structures, regulation depth) is deferred to later phases.
+
+---
+
 ## Contents (to complete)
 
 - Scenario list: names, intent, default markets, default player role

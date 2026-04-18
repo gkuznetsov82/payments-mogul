@@ -12,8 +12,15 @@ Per-screen UI blueprint: components, data bindings, states.
 
 ## Contents (to complete)
 
-- **Simulation shell** — **Pause**, **Resume**, **Next Day** (single tick while paused), **speed** (1×/2×/3× for continuous play), debug window control; status of current tick and **paused** vs **running** state (**`30-architecture.md`**, **`12-ui-ux-spec.md`**).
-- One subsection per other screen
-- Components and layout grid
-- Loading / empty / error states
-- Data dependencies (API + realtime)
+- **Text simulation shell** — **Pause**, **Resume**, **Next Day**, speed controls; current tick id and run state in text.
+- **Text intake status line** — show lifecycle phase in text:
+  - `intake_window_opened`
+  - `intake_window_closed`
+  - `user_inputs_processed`
+  - `tick_committed`
+- **Text command input panel** — submit control commands such as `CloseOnboarding(vendor_id, product_id)` / `OpenOnboarding(vendor_id, product_id)`.
+- **Text command log** — append `command_ack` events with accepted/rejected and target tick fields.
+- **Text outcome log** — append `action_outcome` lines for onboarding/transact request/decision results.
+- **Text snapshot block** — latest post-commit values for key pop/vendor/product counters and gates.
+
+This prototype UI is intentionally text-first and non-visual; no chart/dashboard requirements are needed for the phase gate.

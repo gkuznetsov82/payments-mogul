@@ -66,6 +66,48 @@ Modes differ by **what is stored after each tick**, not by different economic ru
 
 ---
 
+## Prototype v1 execution profile (vertical slice)
+
+For the bare-bones prototype (`prototype_vendor_pop_v1`), define an explicit minimal runtime profile:
+
+- **Single-process authoritative simulation loop** (no distributed scheduling assumptions).
+- **Tick-boundary command intake window** with explicit close and processing phases.
+- **Deterministic command ordering** per tick:
+  - commands targeted to tick `T` are ordered by stable ingest order (or equivalent deterministic tie-breaker)
+  - commands arriving after intake close for `T` are deferred to `T+1`
+- **Agent-owned action execution:** simulation logic calls agent methods; external commands modify control state and do not directly execute counterpart actions.
+
+### Prototype tick cycle (minimum contract)
+
+1. Emit/open **intake window** for tick `T`.
+2. Receive and validate user commands while intake is open.
+3. Close intake window for `T`.
+4. Run **`tick_user_inputs_processed`** phase for `T`:
+   - apply accepted intake commands for tick `T` to control/world state.
+5. Start simulation loop for `T` with fixed method order:
+   - call `Onboard()` on all agent classes (noop allowed by class contract),
+   - then call `Transact()` on all agent classes.
+6. Run pipeline adjudication and aggregate outputs (see **`33-transaction-pipeline.md`**).
+7. Commit world-state changes atomically for tick close (`tick_committed`).
+8. Emit tick lifecycle and outcome events for clients (see **`52-realtime-ui-protocol.md`**).
+
+### Timing semantics for user inputs
+
+- If a command is accepted **before** tick `T` intake closes, its effects are applied in **`tick_user_inputs_processed`** for `T`, and therefore can affect simulation outcomes in the **same tick**.
+- If a command arrives **after** intake close for `T`, it is queued for processing in `T+1`.
+
+### Prototype persistence minimum
+
+- World state may be maintained in memory for this slice.
+- At each committed tick, produce a lightweight snapshot payload sufficient for:
+  - API state query (`51`)
+  - realtime `state_snapshot` updates (`52`)
+  - deterministic integration-test assertions.
+
+Durable full-history storage is not required for this prototype beyond existing normal/debug chapter commitments.
+
+---
+
 ## Performance and implementation notes (non-binding)
 
 - **Single vs multi-process**, threading, and batching are implementation choices subject to the determinism policy and observable outcomes above.
