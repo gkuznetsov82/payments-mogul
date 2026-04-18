@@ -15,6 +15,13 @@ Engine boundaries: Mesa scheduling, **tick semantics** (one tick = one simulated
 - **One tick = one simulated day.** Intra-day mechanics (authorization, clearing, settlement as modeled) run **within** that tick and produce **economic outcomes** for the day: volumes, fees, fund transfers, and **aggregated accounting postings** to institutional P&L/balance sheet and pop sinks (**`01-principles.md`** accounting boundary).
 - **Process order (conceptual):** world state at start of day → agent steps and exogenous inputs → aggregate transaction intents and pipeline stages (**`33-transaction-pipeline.md`**) → fee calculations (**`21-fee-economics.md`**) → fund movement per rails (**`20-payment-rails.md`**) → ledger postings → events/shocks (**`34-events-scheduler.md`**) → end-of-day snapshots and optional detailed logging (mode-dependent). Exact ordering for determinism must be **fixed and documented** in implementation; any parallelization must preserve bitwise or documented equivalence to a serial reference order.
 
+### Numeric type and rounding policy (required)
+
+- Counts that represent **people** or **transaction cardinality** are discrete and must be emitted/stored as **integers** (for example: requested onboard count, accepted onboard count, requested txns, successful txns, failed txns, onboarded population stock).
+- Fractional intermediate math is allowed internally, but values crossing contract boundaries (state, events, API, snapshots, persisted aggregates) must apply deterministic rounding first.
+- Default rounding for discrete counts is **round half up** (`x.5 -> ceil`, otherwise nearest integer), with floor at zero unless a scenario explicitly allows signed deltas.
+- Monetary amounts remain numeric but must use a declared scale/rounding policy from config (`40-yaml-config.md`) before emission/persistence.
+
 ---
 
 ## Play modes: normal vs debug (retention only)
@@ -42,8 +49,15 @@ Modes differ by **what is stored after each tick**, not by different economic ru
 
 ## Wall-clock pacing and speed multipliers
 
-- Between ticks, the client may enforce a **minimum wall-clock interval** per tick at **1× speed** (e.g. if simulated work finishes in less than that interval, the engine **waits** until the interval elapses before starting the next tick). **2×** and **3×** speeds **proportionally reduce** that wait (e.g. half and one-third of the base interval at 2× and 3×), so perceived pace scales with the multiplier.
-- The **base interval** (whether one second or another value) is **configurable** via **`40-yaml-config.md`** / **`41-balance-knobs.md`** and may be tuned after performance testing—not hard-coded in this spec.
+- `tick_wall_clock_base_ms` defines the **total wall-clock budget for one tick** at **1x** speed.
+- `intake_window_ms` defines the intake sub-window **within that same tick budget** (not an additional delay after/before tick budget).
+- Tick timing at speed `S` follows one budget model:
+  - `tick_budget_ms = tick_wall_clock_base_ms / S`
+  - `intake_budget_ms = intake_window_ms / S`
+  - `processing_budget_ms = max(0, tick_budget_ms - intake_budget_ms)`
+- Intake and processing are contiguous phases of a single tick. Do **not** add intake and base tick as separate waits; doing so would overrun intended tick length.
+- If simulation processing finishes earlier than remaining processing budget, engine may wait out the remainder to preserve pacing. If processing exceeds budget, tick overruns and next tick starts immediately (no extra compensating wait).
+- The base interval and intake sub-window are **configurable** via **`40-yaml-config.md`** / **`41-balance-knobs.md`** and may be tuned after performance testing—not hard-coded in this spec.
 
 ---
 

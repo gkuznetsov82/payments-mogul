@@ -20,11 +20,17 @@ These validations are the minimum required to load and run `prototype_vendor_pop
 - At least one `world.vendor_agents[]` and at least one `world.pops[]` must exist.
 - Every `product_links[]` reference must resolve to an existing `(vendor_id, product_id)` pair.
 - `pop_count > 0`.
+- `pop_count` must be integer-valued.
 - `0 <= daily_onboard <= 1`.
 - `0 <= daily_active <= 1`.
 - `daily_transact_count >= 0`.
 - `daily_transact_amount >= 0`.
 - For each link, `0 <= onboarded_count <= pop_count`.
+- `onboarded_count` must be integer-valued.
+- `intake_window_ms <= tick_wall_clock_base_ms`.
+- `simulation.count_rounding_mode` must be recognized (v0: `half_up`).
+- `simulation.amount_scale_dp >= 0`.
+- `simulation.amount_rounding_mode` must be recognized (v0: `half_up`).
 - If friction ranges are provided:
   - `0 <= min <= 1`
   - `0 <= max <= 1`
@@ -48,6 +54,11 @@ These validations are the minimum required to load and run `prototype_vendor_pop
 - `E_RATE_OUT_OF_RANGE`
 - `E_TXN_PARAM_INVALID`
 - `E_ONBOARDED_COUNT_INVALID`
+- `E_INTAKE_WINDOW_EXCEEDS_TICK_BUDGET`
+- `E_COUNT_NOT_INTEGER`
+- `E_COUNT_ROUNDING_MODE_INVALID`
+- `E_AMOUNT_SCALE_INVALID`
+- `E_AMOUNT_ROUNDING_MODE_INVALID`
 - `E_FRICTION_RANGE_INVALID`
 
 ## Contents (to complete)

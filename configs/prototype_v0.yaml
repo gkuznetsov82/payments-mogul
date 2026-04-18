@@ -1,0 +1,56 @@
+config_version: "v0"
+
+scenario:
+  id: "prototype_vendor_pop_v1"
+  seed: 424242
+  market_id: "market_local_v0"
+
+simulation:
+  # tick_wall_clock_base_ms is the TOTAL wall-clock duration of one tick.
+  # intake_window_ms is the portion at the start of the tick reserved for command intake.
+  # Inter-tick wait = tick_wall_clock_base_ms - intake_window_ms - (simulation time, usually ~0).
+  tick_wall_clock_base_ms: 10000
+  debug_history_max_ticks: 30
+  debug_history_default_ticks: 7
+  intake_window_ms: 9500
+  agent_method_order: ["Onboard", "Transact"]
+  agent_iteration_policy: "stable_sorted_ids"
+  # Numeric typing policy (spec 40 §simulation, 51, 52). Counts emitted as integers,
+  # amounts scaled to amount_scale_dp decimal places.
+  count_rounding_mode: "half_up"
+  amount_scale_dp: 2
+  amount_rounding_mode: "half_up"
+
+world:
+  vendor_agents:
+    - vendor_id: "vendor_alpha"
+      vendor_label: "Vendor Alpha"
+      operational: true
+      products:
+        - product_id: "prod_prepaid_alpha"
+          product_label: "Alpha Prepaid Card"
+          product_class: "RetailPayment-Card-Prepaid"
+          onboarding_friction:
+            min: 0.05
+            max: 0.10
+          transaction_friction:
+            min: 0.02
+            max: 0.08
+
+  pops:
+    - pop_id: "pop_main"
+      pop_label: "Main Pop Segment"
+      pop_count: 10000
+      daily_onboard: 0.03
+      daily_active: 0.40
+      daily_transact_count: 1.2
+      daily_transact_amount: 22.5
+      product_links:
+        - vendor_id: "vendor_alpha"
+          product_id: "prod_prepaid_alpha"
+          known: true
+          onboarded_count: 0
+
+control_defaults:
+  accepting_onboard: true
+  accepting_transact: true

@@ -12,12 +12,14 @@ Streaming contract between engine and dashboard: snapshots, deltas, throttling, 
 
 ## Control messages (outline)
 
-- **Pause requested** — Server completes **current tick**, then emits **paused** with tick id and snapshot boundary.
-- **Resume** — Client requests **continuous** play; **next tick** begins after any configured **wall-clock wait** for current speed (**`30-architecture.md`**).
+- **Pause requested** — If intake is still open for tick `T`, server enters **pause_pending** and freezes intake countdown; otherwise server pauses after current tick commit.
+- **Resume** — If intake countdown is frozen by pause-pending, resume unfreezes that countdown from remaining time; otherwise it resumes continuous play between ticks.
 - **Next day** — Client requests **single** tick while **paused**; server runs **one** tick, emits **paused** again with updated tick id (**no** inter-tick speed wait after the step—**`30-architecture.md`**).
 - **Set speed** — **1×**, **2×**, **3×** (or multiplier); affects **wait only** between ticks in **continuous** mode, not simulation math.
-- **Set debug rolling window** — **N** ticks, clamped to config max; may trigger **storage** resize or prune messages.
+- **Set debug rolling window** — **Deferred for prototype runtime** until transaction-pipeline detailed bucket history exists; current scope keeps config keys and does not require runtime control messages for this yet (**`33-transaction-pipeline.md`**).
 - **Decision submitted** — Acknowledge with target/processing tick metadata; same-tick vs next-tick processing follows intake-close timing rules (**`30-architecture.md`**, **`31-agents.md`**).
+- **Config reload + world restart** — Client can request server config re-read and world restart; stream emits restart lifecycle events and fresh snapshot boundary.
+- **Server shutdown request** — Client can request graceful shutdown via control API; stream emits `server_shutdown` before close.
 
 ---
 
@@ -37,11 +39,26 @@ For `prototype_vendor_pop_v1`, realtime stream should expose the control/simulat
 - `tick_user_inputs_processed`: accepted commands for tick `T` were applied; simulation run for `T` has not yet committed.
 - `tick_committed`: simulation for tick `T` has completed and state changes are committed.
 
+Tick time model semantics for clients:
+
+- `tick_wall_clock_base_ms` is total tick budget at 1x; `intake_window_ms` is contained within that budget.
+- Client countdowns must treat intake and processing as phases of one tick timeline, not two additive timelines.
+
+Count and quantity fields inside lifecycle/outcome/snapshot payloads must follow numeric typing policy:
+
+- Person and transaction counts are emitted as integers.
+- Amount fields use configured amount scale/rounding from **`40-yaml-config.md`**.
+
 ### Additional prototype events
 
 - `command_ack` (accepted/rejected + target tick metadata)
 - `action_outcome` (request/decision outcomes for onboard/transact)
 - `state_snapshot` (post-commit state for text UI and tests)
+- `intake_countdown_paused` (pause requested while intake is open; includes remaining ms)
+- `intake_countdown_resumed` (resume during frozen intake; includes remaining ms at resume)
+- `world_restarting` (reload requested and accepted; old world draining)
+- `world_restarted` (new world initialized; includes new baseline tick/snapshot generation id)
+- `server_shutdown` (server is intentionally going down; includes reason and reconnect hint)
 
 ### Ordering requirement
 
@@ -53,6 +70,33 @@ For a given tick `T`, lifecycle events must preserve order:
 4. `tick_committed`
 
 Command and outcome events may interleave by phase, but must not violate this lifecycle order.
+
+When pause is requested during intake-open for tick `T`:
+
+1. `tick_intake_window_opened`
+2. `intake_countdown_paused`
+3. (optional idle interval while frozen)
+4. `intake_countdown_resumed` (after resume)
+5. `tick_intake_window_closed`
+6. `tick_user_inputs_processed`
+7. `tick_committed`
+
+If pause-pending is still active at step 7, next state snapshot must indicate `paused`.
+
+---
+
+## Shutdown and reconnect contract (prototype requirement)
+
+- Server must emit `server_shutdown` to SSE subscribers before intentionally closing event streams.
+- `server_shutdown` payload should include at least:
+  - `reason` (for example: `manual_shutdown`, `config_reload_restart`, `deploy`)
+  - `grace_period_ms` (time before stream termination when possible)
+  - `reconnect_after_ms` (recommended client retry delay)
+  - `will_restart` (boolean)
+- After emitting `server_shutdown`, server may close SSE connections.
+- Clients should treat stream close without prior `server_shutdown` as unexpected failure and apply exponential backoff reconnect.
+- Clients should treat stream close after `server_shutdown` as expected transition and reconnect using provided delay hint.
+- When `server_shutdown.will_restart == false`, clients may switch from reconnect loop to explicit "server offline" state after bounded retries.
 
 ---
 

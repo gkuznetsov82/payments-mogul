@@ -18,6 +18,12 @@ How **aggregate transaction activity** within a simulated **day** (one **tick**)
   - **Aggregated accounting postings** to the **P&L and balance sheet** of relevant **institutions** and to **pop sinks** where the model attributes flows (**`01-principles.md`**).
 - **Economic rules do not change** between normal and debug mode; only **retention and inspectability** change (**`30-architecture.md`**).
 
+### Numeric typing and rounding (required)
+
+- Person/population counts and transaction counts are **integers** in all externally visible pipeline outputs.
+- Pipeline stages may compute fractional intermediates, but before stage handoff/output they must apply configured deterministic rounding (`simulation.count_rounding_mode` in **`40-yaml-config.md`**).
+- Amount fields remain numeric and must be normalized to configured scale/rounding (`amount_scale_dp`, `amount_rounding_mode`) before emission/persistence.
+
 ---
 
 ## Normal play-through (storage)
@@ -31,6 +37,7 @@ How **aggregate transaction activity** within a simulated **day** (one **tick**)
 - The user configures a **rolling window** of **N ticks** (simulated days). For ticks inside the window, retain a **full per-aggregate / per-bucket log** for that day (Option A: complete bucket-level detail for the dimensions the engine uses—not a statistical sample). Ticks older than **N** **expire** from the detailed store as the simulation advances.
 - **N** is **capped** by configuration (**`40-yaml-config.md`**) to protect resources.
 - Detailed history should live in a **queryable persistence layer** (e.g. embedded relational store—**`30-architecture.md`**) so debug UIs can query by institution, bucket, time range, and fee line without scanning flat files.
+- **Prototype sequencing note:** runtime debug-window controls and retention enforcement are deferred until this pipeline emits compactable detailed data. Before that milestone, `debug_history_*` acts as reserved config only.
 
 ---
 
@@ -62,6 +69,8 @@ This preserves the principle that each agent executes its own logic; external AP
   - successful transact amount total
 - **Minimal posting placeholder** for successful transact:
   - one simplified posting entry (amount and counterpart identifiers) for integration-test assertions.
+
+For this prototype, all listed counters are integer-valued after rounding policy application.
 
 ### Deferred in this slice
 

@@ -1,0 +1,41 @@
+config_version: "v0"
+
+scenario:
+  id: "wrong_scenario_name"   # E_SCENARIO_ID_UNSUPPORTED
+  seed: 1
+  market_id: "market_test"
+
+simulation:
+  tick_wall_clock_base_ms: 1000
+  debug_history_max_ticks: 30
+  debug_history_default_ticks: 7
+  intake_window_ms: 500
+  agent_method_order: ["Onboard", "Transact"]
+  agent_iteration_policy: "stable_sorted_ids"
+
+world:
+  vendor_agents:
+    - vendor_id: "v1"
+      vendor_label: "V1"
+      operational: true
+      products:
+        - product_id: "p1"
+          product_label: "P1"
+          product_class: "GenericProduct"
+  pops:
+    - pop_id: "pop1"
+      pop_label: "Pop 1"
+      pop_count: 1000
+      daily_onboard: 0.01
+      daily_active: 0.10
+      daily_transact_count: 1.0
+      daily_transact_amount: 10.0
+      product_links:
+        - vendor_id: "v1"
+          product_id: "p1"
+          known: true
+          onboarded_count: 0
+
+control_defaults:
+  accepting_onboard: true
+  accepting_transact: true

@@ -81,8 +81,8 @@ This subsection defines the **minimum authoritative contracts** for `prototype_v
 - `owner_vendor_id` (`string`) - Owning `VendorAgent` id.
 - `accepting_onboard` (`bool`) - Gate checked during onboarding decisions.
 - `accepting_transact` (`bool`) - Gate checked during transact decisions.
-- `onboarded_pop_count` (`number`) - Aggregate stock currently onboarded to this product.
-- `successful_transact_count` (`number`) - Aggregate successful transaction count.
+- `onboarded_pop_count` (`integer`) - Aggregate stock currently onboarded to this product.
+- `successful_transact_count` (`integer`) - Aggregate successful transaction count.
 - `successful_transact_amount` (`number`) - Aggregate successful transaction amount.
 - `last_action_result` (`object|null`) - Last decision summary emitted by this product.
 
@@ -110,13 +110,15 @@ Control methods are applied during `tick_user_inputs_processed` for the target t
 #### Result payload shapes (normalized)
 
 - `OnboardDecisionResult`:
-  - `accepted_pop_count` (`number`)
-  - `rejected_pop_count` (`number`)
+  - `accepted_pop_count` (`integer`)
+  - `rejected_pop_count` (`integer`)
 - `TransactDecisionResult`:
-  - `successful_txn_count` (`number`)
-  - `failed_txn_count` (`number`)
+  - `successful_txn_count` (`integer`)
+  - `failed_txn_count` (`integer`)
   - `successful_total_amount` (`number`)
   - `failed_total_amount` (`number`)
+
+Counts must follow the deterministic rounding policy from **`30-architecture.md`** / **`40-yaml-config.md`** before being returned in result payloads.
 
 ### `RetailPayment-Card-Prepaid` (extends `GenericProduct`)
 
@@ -135,10 +137,10 @@ Pops are stock-flow objects representing aggregated segment mass, not individual
 
 - `pop_id` (`string`) - Stable identifier.
 - `pop_label` (`string`) - Human-readable label.
-- `pop_count` (`number`) - Total population stock in this segment.
+- `pop_count` (`integer`) - Total population stock in this segment.
 - `products` (`map<vendor_id, map<product_id, ProductLinkState>>`) - Relationship graph to known products.
   - `ProductLinkState.known` (`bool`) - Whether this pop evaluates the product for onboarding/transacting.
-  - `ProductLinkState.onboarded_count` (`number`) - Segment mass currently onboarded to this vendor/product pair.
+  - `ProductLinkState.onboarded_count` (`integer`) - Segment mass currently onboarded to this vendor/product pair.
 - `daily_onboard` (`float`) - Share of `pop_count` attempting onboarding per tick.
 - `daily_active` (`float`) - Share of onboarded population attempting activity per tick.
 - `daily_transact_count` (`number`) - Requested transaction count per active population unit.

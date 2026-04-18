@@ -14,9 +14,11 @@ Config file layout, anchors/aliases patterns, mapping to Pydantic models, and **
 
 These belong in **base** or **scenario** config (exact shape is implementation-defined but must be **validated**):
 
-- **`tick_wall_clock_base_ms`** (or equivalent) — Minimum wall-clock **wait** between ticks at **1×** speed, after simulated work completes. Tunable; default TBD after stress testing (**`30-architecture.md`**).
+- **`tick_wall_clock_base_ms`** (or equivalent) — Total wall-clock **duration budget per tick** at **1x** speed (intake + processing within one budget). Tunable; default TBD after stress testing (**`30-architecture.md`**).
 - **`debug_history_max_ticks`** — **Hard cap** on the user-selectable **rolling window** length for **debug** detailed history. Must reject or clamp invalid values (**`33-transaction-pipeline.md`**).
 - Optional: **`debug_history_default_ticks`** — Suggested default when enabling debug mode.
+
+For the current prototype phase, these `debug_history_*` keys are **validated/reserved** but runtime enforcement and UI/API controls are deferred until transaction-pipeline detailed data retention is implemented (**`33-transaction-pipeline.md`**).
 
 Implementation may store **debug bucket history** in an embedded **database** path or URI (**`30-architecture.md`**); if so, surface **path**, **size limits**, and **cleanup** policy in config or ADR.
 
@@ -48,6 +50,9 @@ This section locks a **minimal YAML contract** for the first runnable vertical s
 - `intake_window_ms` (`integer`, `>= 1`) - Duration of command intake before close for a tick.
 - `agent_method_order` (`array[string]`) - Must be `["Onboard", "Transact"]` in v0.
 - `agent_iteration_policy` (`string`) - `stable_sorted_ids` for deterministic traversal.
+- `count_rounding_mode` (`string`) - Rounding mode for discrete counts; v0 default/recommended: `half_up`.
+- `amount_scale_dp` (`integer`, `>= 0`) - Decimal places for amount emission/persistence.
+- `amount_rounding_mode` (`string`) - Rounding mode for amounts; v0 default/recommended: `half_up`.
 
 ### `world.vendor_agents[]` item
 
@@ -72,7 +77,7 @@ This section locks a **minimal YAML contract** for the first runnable vertical s
 
 - `pop_id` (`string`)
 - `pop_label` (`string`)
-- `pop_count` (`number`, `> 0`)
+- `pop_count` (`integer`, `> 0`)
 - `daily_onboard` (`float`, `0..1`)
 - `daily_active` (`float`, `0..1`)
 - `daily_transact_count` (`number`, `>= 0`)
@@ -84,7 +89,11 @@ This section locks a **minimal YAML contract** for the first runnable vertical s
 - `vendor_id` (`string`)
 - `product_id` (`string`)
 - `known` (`boolean`)
-- `onboarded_count` (`number`, `>= 0`, `<= pop_count`)
+- `onboarded_count` (`integer`, `>= 0`, `<= pop_count`)
+
+`daily_transact_count` and `daily_transact_amount` may remain non-integer rates/intensities in v0, but all derived **transaction counts** and **population counts** must be rounded to integers using `simulation.count_rounding_mode` before becoming externally visible outputs (events, snapshots, persistence).
+
+`intake_window_ms` must be `<= tick_wall_clock_base_ms` for non-overrun pacing semantics; intake is a subset of total tick time budget, never an additive second budget.
 
 ### `control_defaults` section
 
@@ -110,6 +119,9 @@ simulation:
   intake_window_ms: 500
   agent_method_order: ["Onboard", "Transact"]
   agent_iteration_policy: "stable_sorted_ids"
+  count_rounding_mode: "half_up"
+  amount_scale_dp: 2
+  amount_rounding_mode: "half_up"
 
 world:
   vendor_agents:
