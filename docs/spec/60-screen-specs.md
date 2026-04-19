@@ -13,6 +13,7 @@ Per-screen UI blueprint: components, data bindings, states.
 ## Contents (to complete)
 
 - **Text simulation shell** — **Pause**, **Resume**, **Next Day**, speed controls; current tick id and run state in text.
+- **Text simulation shell** — must also show current `simulation_date` and active currency context (at minimum `default_currency`).
 - **Text intake status line** — show lifecycle phase in text:
   - `intake_window_opened`
   - `intake_countdown_paused` (with remaining time)
@@ -24,12 +25,77 @@ Per-screen UI blueprint: components, data bindings, states.
 - **Text command log** — append `command_ack` events with accepted/rejected and target tick fields.
 - **Text outcome log** — append `action_outcome` lines for onboarding/transact request/decision results.
 - **Text snapshot block** — latest post-commit values for key pop/vendor/product counters and gates.
+- **Text snapshot block** — must show:
+  - `simulation_date`
+  - `scenario_start_date_resolved`
+  - `default_currency`
+  - amount values with explicit currency label (not unlabeled numerics).
 - **Numeric presentation rule** — render population/transaction counts as whole numbers (no fractional display); render amounts with configured decimal scale.
 - **Text lifecycle banner** — show `world_restarting`, `world_restarted`, and `server_shutdown` transitions so stream disconnect is not surfaced as an unexplained error.
 - **Text reconnect status** — display countdown to reconnect using server hint when `server_shutdown.reconnect_after_ms` is provided.
 - **Debug window control (deferred)** — no interactive control required in current prototype UI until transaction-pipeline detailed history is implemented.
 
-This prototype UI is intentionally text-first and non-visual; no chart/dashboard requirements are needed for the phase gate.
+---
+
+## TUI observability views (required for pipeline readiness)
+
+Text-first presentation remains valid, but operator workflow must include focusable views (tabs or equivalent panes) that expose pipeline and accounting state.
+
+### View A — World overview (comprehensive)
+
+- Purpose: quickly assess world-wide health and per-agent/per-product status.
+- Required blocks:
+  - world summary totals (population, onboarded, transact requested/succeeded/failed),
+  - vendor/agent roster with role labels (issuer, scheme, processor, other),
+  - per-product status row (attached `pipeline_profile_id`, control gates, region, operational status),
+  - simulation context (`tick_id`, `simulation_date`, mode, speed, default currency).
+- Required interactions:
+  - keyboard navigation across vendor -> product hierarchy,
+  - expand/collapse for per-product detail,
+  - quick jump to fee/transaction/ledger views for selected product.
+
+### View B — Pipeline activity (fees / transactions / value transfers)
+
+- Purpose: verify transactional flow and fee lifecycle in execution order.
+- Required stream/log groups:
+  - transaction intents (incoming/outgoing, source product, destination role/product),
+  - fee accrual records (fee id, beneficiary role/product, amount components),
+  - value transfer records (source/destination container refs, amount, value date),
+  - invoice transaction events for deferred settlement (`next_month_day_plus_x` flows).
+- Required columns/fields:
+  - `tick_id`, `simulation_date`, `product_id`, `pipeline_profile_id`,
+  - `trigger_id` / `intent_id` / `fee_id`,
+  - `value_date_policy` + offset and resolved due date,
+  - status (`accrued`, `invoiced`, `paid`, `netted`, `failed`).
+- Required interactions:
+  - filter by product, counterparty role, fee id, date range,
+  - phase-order sort (intent -> fee -> posting -> transfer -> invoice/settlement),
+  - drill from one row into linked downstream records.
+
+### View C — Ledger and value-container reconciliation
+
+- Purpose: confirm postings and actual value movement remain consistent.
+- Required blocks:
+  - ledger movement table (debit/credit entries by ledger ref/path),
+  - value-container movement table (transfers by container ref/path),
+  - reconciliation table (`ledger_ref` -> `container_ref`, expected vs actual deltas),
+  - open settlement obligations (including invoice-backed fee payables/receivables).
+- Required interactions:
+  - compare-by-tick and compare-by-date modes,
+  - highlight mismatches (`unmapped`, `unbalanced`, `pending_due`, `past_due`),
+  - jump from mismatch line to contributing postings/transfers/events.
+
+### Minimum navigation contract
+
+- Views must be keyboard-switchable as primary sections (tabs or equivalent).
+- Baseline required sections:
+  - `World`
+  - `Pipeline`
+  - `Ledger`
+  - existing controls/events panel(s) remain accessible from all sections.
+- If viewport is constrained, section switching may become paged, but all three sections remain reachable.
+
+This prototype UI remains text-first and does not require graphical chart rendering for this phase gate.
 
 ---
 
@@ -66,3 +132,11 @@ This prototype UI is intentionally text-first and non-visual; no chart/dashboard
   - intake phase countdown: remaining `intake_window_ms` slice (speed-adjusted),
   - processing phase countdown: remaining `tick_wall_clock_base_ms - intake_window_ms` slice (speed-adjusted).
 - Do not display intake and full tick as additive independent waits.
+
+### Date/currency display contract (prototype extension)
+
+- Status/header row should include `simulation_date` beside tick id/run mode.
+- Amount-bearing lines in event log and state blocks should render either:
+  - `<amount> <currency>`, or
+  - money-object equivalent formatting.
+- Scalar-amount fallback behavior is intentionally not part of v2 foundations; realtime/API payloads must provide money-object currency context.

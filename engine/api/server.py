@@ -44,7 +44,10 @@ logging.config.dictConfig({
     },
 })
 
-CONFIG_PATH = Path(__file__).parent.parent.parent / "configs" / "prototype_v0.yaml"
+# v2 foundations runtime config: enables money-object mode, currency catalog,
+# regions/calendars/FX sections (spec 40 §Prototype v2 foundations).
+# Switch to "prototype_v0.yaml" if you want the legacy scalar-amount scenario.
+CONFIG_PATH = Path(__file__).parent.parent.parent / "configs" / "prototype_v2_foundations_example.yaml"
 
 # Global engine instance (set on startup)
 _engine: SimulationEngine | None = None

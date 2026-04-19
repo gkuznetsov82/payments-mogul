@@ -76,6 +76,34 @@ For `prototype_vendor_pop_v1`, API inputs are treated as **control-state command
 - API payloads that represent people or transaction counts must be integers (no fractional counts).
 - Amount fields remain numeric and follow configured scale/rounding policy from **`40-yaml-config.md`**.
 
+### Date and currency visibility contract (TUI/API requirement)
+
+To support operator clarity in TUI and other clients, API responses that expose simulation state must include:
+
+- `simulation_date` (`YYYY-MM-DD`) - current tick-resolved business date.
+- `scenario_start_date_resolved` (`YYYY-MM-DD`) - resolved value after `"today"` evaluation.
+- `default_currency` (ISO 4217 alpha-3) - active default currency from config.
+
+Amount-bearing payloads should expose currency context via one of:
+
+- **Required:** money object form `{ amount, currency }`.
+
+For v2 foundations spec, legacy scalar amount compatibility is intentionally not included.
+
+### Minimum state query/snapshot fields (prototype extension)
+
+`GET /snapshot` (or equivalent state query) should include at minimum:
+
+- `tick_id`
+- `run_mode`
+- `simulation_date`
+- `scenario_start_date_resolved`
+- `default_currency`
+- `config.amount_scale_dp`
+- `config.amount_rounding_mode`
+
+When returning aggregates/outcomes with amounts, include money objects so TUI can label units explicitly.
+
 ### Minimum command acknowledgement envelope
 
 - `command_id`

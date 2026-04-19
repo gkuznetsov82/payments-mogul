@@ -1,6 +1,7 @@
 # Simulation Architecture
 
 **Status:** Draft
+**Binding level:** Mixed (`v1` runtime-binding baseline, `v2` spec-only extensions, `v3` runtime-target)
 
 ## Purpose
 
@@ -10,10 +11,40 @@ Engine boundaries: Mesa scheduling, **tick semantics** (one tick = one simulated
 
 ---
 
+## Versioning and promotion policy
+
+- `v1` remains the active runtime architecture contract for `prototype_vendor_pop_v1`.
+- `v2_foundations` additions are architecture/spec contracts that may reserve fields and sequencing language but do not require runtime behavior change.
+- `v3_runtime` is the target where promoted pipeline stages become execution requirements.
+- Promotion criteria for any pipeline stage:
+  - stage semantics are specified in **`33-transaction-pipeline.md`**,
+  - config surface is locked in **`40-yaml-config.md`**,
+  - determinism impact is documented in this chapter and accepted by architecture review.
+
+### Binding matrix
+
+| Area | `v1` | `v2_foundations` | `v3_runtime` |
+|---|---|---|---|
+| Tick lifecycle | Runtime-binding | Runtime-binding | Runtime-binding |
+| Agent `Onboard`/`Transact` order | Runtime-binding | Runtime-binding | Runtime-binding |
+| Full intent->fee->posting->transfer pipeline | Deferred | Spec-only contract | Runtime-binding target |
+| Debug detailed retention controls | Reserved/validated | Spec-level retention contract | Runtime-binding target |
+
+---
+
 ## Tick semantics
 
 - **One tick = one simulated day.** Intra-day mechanics (authorization, clearing, settlement as modeled) run **within** that tick and produce **economic outcomes** for the day: volumes, fees, fund transfers, and **aggregated accounting postings** to institutional P&L/balance sheet and pop sinks (**`01-principles.md`** accounting boundary).
 - **Process order (conceptual):** world state at start of day → agent steps and exogenous inputs → aggregate transaction intents and pipeline stages (**`33-transaction-pipeline.md`**) → fee calculations (**`21-fee-economics.md`**) → fund movement per rails (**`20-payment-rails.md`**) → ledger postings → events/shocks (**`34-events-scheduler.md`**) → end-of-day snapshots and optional detailed logging (mode-dependent). Exact ordering for determinism must be **fixed and documented** in implementation; any parallelization must preserve bitwise or documented equivalence to a serial reference order.
+- For `v3_runtime` promotion, deterministic stage order is fixed as: intents -> fees -> postings -> asset transfers -> retention. Until promotion, this sequence is normative architecture guidance only.
+
+### Start date and calendar boundary (v2 foundations spec)
+
+- Scenario start date is configuration-driven (`scenario.start_date` in **`40-yaml-config.md`**) and accepts either `"today"` (resolved once at run start) or explicit `YYYY-MM-DD`.
+- Tick-to-date mapping after start-date resolution is deterministic (`date(T) = start_date + T days`).
+- Region-to-calendar assignment is configuration-driven; regions reference calendar objects and do not define weekend/holiday rules directly.
+- World entities may carry `region_id` mapping so vendors/pops resolve calendar context through region assignment.
+- In v2 foundations, this is a schema/spec boundary only; runtime adoption is deferred.
 
 ### Numeric type and rounding policy (required)
 

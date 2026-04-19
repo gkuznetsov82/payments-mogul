@@ -1,0 +1,16 @@
+schema_version: "v2-foundations-calendar-local-v1"
+description: "Local additive non-working date overlay for deterministic scenarios."
+
+calendars:
+  - calendar_id: "cal_global_default"
+    notes: "Region-level calendar; not constrained to a single country."
+    additional_non_working_dates:
+      - date: "2026-11-27"
+        reason: "Post-Thanksgiving closure"
+      - date: "2026-12-31"
+        reason: "Year-end operational freeze"
+  - calendar_id: "cal_gcc_fri_sat"
+    notes: "GCC-oriented calendar overlay."
+    additional_non_working_dates:
+      - date: "2026-06-28"
+        reason: "Local observance"

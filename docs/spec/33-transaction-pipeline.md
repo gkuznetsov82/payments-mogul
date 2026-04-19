@@ -1,12 +1,35 @@
 # Transaction Pipeline
 
 **Status:** Draft
+**Binding level:** Mixed (`v1` runtime-binding, `v2` spec-only, `v3` runtime-target)
 
 ## Purpose
 
 How **aggregate transaction activity** within a simulated **day** (one **tick**) becomes **fees**, **fund transfers**, and **ledger postings**; what is **stored** in **normal** vs **debug** play; and how this ties to UI and reporting.
 
+Prototype sequencing note: Money/Calendar/FX schema work in v2 is documented in **`40-yaml-config.md`** as a spec-only foundation; pipeline implementation expansion is deferred to v3.
+
 **Cross-references:** tick = one day, pause, modes **`30-architecture.md`**; fee rules **`21-fee-economics.md`**; rails and settlement **`20-payment-rails.md`**; institutions and sinks **`01-principles.md`**, **`31-agents.md`**; realtime payloads **`52-realtime-ui-protocol.md`**; config caps **`40-yaml-config.md`**.
+
+---
+
+## Versioning and promotion policy
+
+- `v1` (`prototype_vendor_pop_v1`) remains the authoritative runtime behavior until an explicit promotion decision is recorded.
+- `v2` additions in this chapter are normative **schema/contract language** only and are **non-runtime-binding**.
+- `v3` is the first target where promoted pipeline stages become runtime-mandatory.
+- Promotion from `v2` to `v3` requires:
+  - contract parity between this chapter and **`40-yaml-config.md`**,
+  - deterministic stage-order statement in **`30-architecture.md`**,
+  - explicit acceptance criteria in a handoff backlog for implementation.
+
+### Version gates
+
+| Version | Binding | Scope |
+|---|---|---|
+| `v1` | Runtime-binding | Agent-owned onboarding/transact adjudication and minimal outputs |
+| `v2_foundations` | Spec-only | Canonical pipeline objects, routing/posting/transfer/fee schema contracts |
+| `v3_runtime` | Runtime-binding target | Full transaction-intent -> fees -> postings -> asset transfers execution |
 
 ---
 
@@ -47,6 +70,71 @@ How **aggregate transaction activity** within a simulated **day** (one **tick**)
 
 ---
 
+## Canonical pipeline artifacts (v2 spec-only)
+
+These artifacts formalize the unstructured transaction-pipeline notes and are not runtime-mandatory until promoted:
+
+- `TransactionIntent`
+  - aggregate instruction emitted by onboarding/transact adjudication.
+  - may route to one or more destinations by `destination_role` (or `local` sink), once routed to external destination will generate another `TransactionIntent` by making respective Transact() call to resolved destination agent
+  - supports deterministic value-date policy tokens (`same_day`, `next_day_plus_x`, `next_working_day_plus_x`, `next_month_day_plus_x`).
+  - when a policy contains `plus_x`, an explicit integer offset parameter is required (`value_date_offset_days`).
+- `FeeResult`
+  - fee computed in configured sequence order.
+  - may be triggered by transaction intents or prior fee results.
+  - includes deterministic trigger filters and amount basis (`count_cost`, `amount_percentage`, or declared formula mode).
+  - supports explicit settlement policy, including `next_month_day_plus_x` with required `value_date_offset_days`.
+- `PostingEntry`
+  - dual-entry accounting record with required `source` and `destination`.
+  - source and destination must be role-resolved ledger references, not hardcoded product IDs or agent IDs.
+  - amount must resolve to a single currency before posting.
+  - value-date policy follows the same deterministic token set.
+- `AssetTransfer`
+  - movement between concrete value containers (not ledger accounts).
+  - source and destination must be role-resolved container references, not hardcoded product IDs or agent IDs.
+  - supports source/destination container refs, amount basis, and deterministic value-date policy.
+- `ValueContainerMap`
+  - reconciliation map linking ledger nodes to value containers.
+  - supports aggregate mappings (for example, settlement-funds ledgers mapping to per-agent settlement containers).
+
+### Role-based reference resolution (v2 spec-only)
+
+- Pipeline configuration must be reusable across product instances; therefore pipeline rules must reference roles rather than concrete `agent_id` or `product_id`.
+- Resolution of roles to concrete IDs is owned by product-instance config in **`40-yaml-config.md`**.
+- Role resolution must occur before generating `PostingEntry` and `AssetTransfer` artifacts for a tick.
+- Ledger path construction for posting is defined by config-level ledger construction contracts in **`40-yaml-config.md`** (not only by ledger-to-container mapping).
+
+### Product-owned pipelines and inter-product handoff (v2 spec-only)
+
+- Pipeline execution is attached **per product instance**. Each product owns one pipeline profile.
+- A pipeline profile can be reused by multiple products, but execution context is always the owning product.
+- When Product A emits outgoing `TransactionIntent` to Product B (via resolved destination role), Product B's attached pipeline becomes responsible for downstream fee and settlement logic for that intent.
+- This preserves the agent-owned principle: each agent/product computes and executes its own obligations.
+
+### Invoice-triggered fee settlement (v2 spec-only)
+
+- For fee contracts that settle on `next_month_day_plus_x`, beneficiary side emits an `InvoiceTransactionEvent` on the due date.
+- The invoice event triggers payer-side settlement handling in one of two modes:
+  - pay invoice directly, or
+  - net invoice against settlement amounts already owed (if configured).
+- Fee accrual and fee collection are separate lifecycle steps:
+  - accrual occurs when fee is computed,
+  - collection occurs when invoice event is generated/reconciled at due date.
+
+### Iteration fee sinks profile (v2 spec-only)
+
+- Introduce two sink-type vendor roles in pipeline contracts:
+  - `payment_scheme` (with `scheme_access_product`)
+  - `payment_processor` (with `processor_services_product`)
+- Fee contracts for this iteration:
+  - `processor_services`: fixed fee per transaction (`count_cost`)
+  - `scheme_access`: fixed fee per transaction (`count_cost`) plus percent of transaction amount (`amount_percentage`)
+- Settlement requirement for both fee contracts:
+  - `settlement_value_date_policy = next_month_day_plus_x`
+  - `settlement_value_date_offset_days = 5`
+
+---
+
 ## Prototype v1 pipeline subset (agent-owned flow)
 
 For `prototype_vendor_pop_v1`, pipeline execution starts only **after** `tick_user_inputs_processed` is complete for tick `T` (**`30-architecture.md`**).
@@ -77,6 +165,8 @@ For this prototype, all listed counters are integer-valued after rounding policy
 - Full fee taxonomy and line-item decomposition.
 - Deep clearing/settlement stage modeling by rail.
 - Rich decline hierarchies beyond basic reason codes.
+- Multi-destination transaction-intent routing and aggregation rules from `v2_foundations`.
+- Full posting and asset-transfer contracts from `v2_foundations`.
 
 ---
 

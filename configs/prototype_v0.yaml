@@ -54,3 +54,75 @@ world:
 control_defaults:
   accepting_onboard: true
   accepting_transact: true
+
+# -----------------------------------------------------------------------------
+# Prototype v2 foundations (spec-only, illustrative)
+# Keep commented until runtime schema support is implemented.
+# -----------------------------------------------------------------------------
+# scenario:
+#   start_date: "today" # or "2026-01-01"
+#
+# money:
+#   amount_rounding_mode: "half_up"
+#   default_currency: "USD"
+#   enforce_money_object: true
+#
+# currency_catalog:
+#   source_type: "local_file"
+#   local_file:
+#     path: "configs/reference/currency_catalog_iso4217_sample.yaml"
+#     format: "yaml"
+#   allow_local_overrides: true
+#
+# fx:
+#   source_policy: "local_override_then_frankfurter"
+#   sources:
+#     local_file:
+#       enabled: true
+#       path: "configs/reference/fx_rates_local_example.yaml"
+#       format: "yaml"
+#   frankfurter_sources:
+#     - source_id: "frankfurter_ecb"
+#       enabled: true
+#       base_url: "https://api.frankfurter.dev/v2"
+#       base_country: "DE"
+#       country_provider_map:
+#         DE: "ECB"
+#       default_provider: "ECB"
+#     - source_id: "frankfurter_usfrb"
+#       enabled: true
+#       base_url: "https://api.frankfurter.dev/v2"
+#       base_country: "US"
+#       country_provider_map:
+#         US: "FED"
+#       default_provider: "FED"
+#   source_refs: ["frankfurter_ecb", "frankfurter_usfrb"]
+#
+# calendars:
+#   - calendar_id: "cal_global_default"
+#     weekend_profile: "sat_sun"
+#     non_working_overrides:
+#       - "2026-12-31"
+#     holiday_source_policy: "local_override_then_nager"
+#     holiday_sources:
+#       local_file:
+#         enabled: true
+#         path: "configs/reference/calendar_local_example.yaml"
+#       nager_date:
+#         enabled: true
+#         base_url: "https://date.nager.at/api/v3"
+#         country_code: "US"
+#         types: ["Public", "Bank"]
+#
+# regions:
+#   - region_id: "region_main"
+#     calendar_id: "cal_global_default"
+#     label: "Main Region"
+#
+# world:
+#   vendor_agents:
+#     - vendor_id: "vendor_alpha"
+#       region_id: "region_main"
+#   pops:
+#     - pop_id: "pop_main"
+#       region_id: "region_main"

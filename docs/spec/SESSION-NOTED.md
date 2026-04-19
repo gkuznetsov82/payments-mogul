@@ -239,3 +239,83 @@
 ### Resume prompt (copy for next chat)
 
 > Read `docs/spec/SESSION-NOTED.md` (including both 2026-04-16 shutdown sections) plus plans at `c:\Users\grigo\.cursor\plans\architecture-first_synthesis_roadmap_34d62d5a.plan.md` and `c:\Users\grigo\.cursor\plans\multiplayer_foundation_architecture_39b46b1b.plan.md`. Continue with architecture-first spec consolidation, then draft API/tick lifecycle schemas for multiplayer control and pause voting.
+
+---
+
+## 2026-04-19 — Prototype v2 foundations runtime build (Money / Currency / FX / Calendar / Region)
+
+Implemented the v2 foundations from spec 40 §Prototype v2 foundations as a runtime layer (the spec marks v2 as "spec-only" but we wired the runtime now to support v3 work). All v2 sections are **optional at the top level** so existing v0 configs continue to load unchanged.
+
+### New config keys (spec 40)
+
+- `scenario.start_date` — `"today"` (resolved once at run start) or `YYYY-MM-DD`.
+- `money.{amount_rounding_mode, default_currency, enforce_money_object}`.
+- `currency_catalog.{source_type, local_file.{path, format}, allow_local_overrides}`.
+- `fx.{source_policy, sources.local_file, frankfurter_sources[], source_refs}`.
+- `calendars[].{calendar_id, weekend_profile, non_working_overrides, holiday_source_policy, holiday_sources.{local_file, nager_date}}`.
+- `regions[].{region_id, calendar_id, label}`.
+- `world.vendor_agents[].region_id`, `world.pops[].region_id` (both optional; pop falls back to default region when absent).
+
+### New stable validation codes
+
+| Code | Trigger |
+|---|---|
+| `E_START_DATE_INVALID` | `scenario.start_date` malformed |
+| `E_DEFAULT_CURRENCY_INVALID` | non-ISO 4217 default currency |
+| `E_CURRENCY_CATALOG_FORMAT_INVALID` | catalog format other than `yaml`/`json` |
+| `E_FX_LOCAL_FORMAT_INVALID` | FX local format other than `yaml`/`json`/`csv` |
+| `E_FX_POLICY_INVALID` | unknown `fx.source_policy` |
+| `E_FX_SOURCE_DUPLICATE` | duplicate Frankfurter `source_id` |
+| `E_FX_SOURCE_REF_NOT_FOUND` | `fx.source_refs` references unknown source |
+| `E_FX_POLICY_SOURCE_MISMATCH` | policy needs sources that aren't enabled/configured |
+| `E_FRANKFURTER_PROVIDER_UNRESOLVED` | source has neither `country_provider_map` nor `default_provider` |
+| `E_COUNTRY_CODE_INVALID` | non-ISO-3166 alpha-2 |
+| `E_WEEKEND_PROFILE_INVALID` | weekend profile not in `{sat_sun, fri_sat}` |
+| `E_HOLIDAY_POLICY_INVALID` | unknown holiday source policy |
+| `E_NON_WORKING_DATE_INVALID` | malformed date in `non_working_overrides` |
+| `E_CALENDAR_DUPLICATE`, `E_REGION_DUPLICATE` | duplicate ids |
+| `E_CALENDAR_NOT_FOUND` | region's calendar_id unknown |
+| `E_REGION_NOT_FOUND` | world entity's region_id unknown |
+
+### Runtime modules added
+
+- `engine/money/` — `Money` (Decimal-backed, quantize-by-currency.minor_unit), `Currency`, `CurrencyCatalog` loader with optional date-validity filtering.
+- `engine/fx/` — `FXRate`, `LocalFXSource`, `FrankfurterFXSource` (lazy httpx; `seed_cache` for tests), `FXService` honoring `source_policy`, `source_refs`, and `requested_source_id`. Per-run in-memory cache for determinism.
+- `engine/calendars/` — `Calendar` (weekend + inline overrides + sources), `LocalHolidaySource`, `NagerDateHolidaySource` (lazy httpx; `seed_year` for tests), `CalendarRegistry`, `RegionRegistry` (default-region fallback when only one region defined).
+- `engine/scenario/dates.py` — `ScenarioDates` resolves `start_date` once via injectable `today_fn`; deterministic `date_for_tick(t) = start + t days`.
+
+### Fallback behavior decisions
+
+- `tick_wall_clock_base_ms = 0` "no pacing" mode preserved; intake/total constraint relaxed.
+- Inline `calendars[].non_working_overrides` always applied regardless of `holiday_source_policy` — they're authoring-time absolutes.
+- Calendar `is_holiday` swallows remote source exceptions to keep working-day lookup robust; tests should `seed_year(...)` for deterministic Nager behavior.
+- `RegionRegistry`: when exactly one region is defined and no explicit default given, that region becomes the implicit default.
+- v2 sections all **optional** at the top level → v0 configs continue to load with `cfg.money = cfg.currency_catalog = cfg.fx = None`, `cfg.calendars = cfg.regions = []`.
+- `Money.of(...)` quantizes via Decimal with explicit rounding mode; if you build `Money(...)` directly, no re-quantize happens (caller is asserting the amount is already correct).
+
+### ISO 4217 sync tool
+
+`tools/sync_iso4217.py` (with PowerShell wrapper `tools/sync_iso4217.ps1`):
+
+- Fetches SIX List One (current) + List Three (historical) XML; parsing is stdlib-only and unit-testable without network.
+- Skips `CcyMnrUnts="N.A."` entries (e.g. metals XAU/XAG) since project schema requires integer minor_unit.
+- Dedupes repeated codes (currencies shared across countries).
+- Normalizes `WthdrwlDt` (`YYYY` → end-of-year, `YYYY-MM` → end-of-month).
+- `merge()` keeps current entries authoritative; historical entries fill in only codes not in current.
+- `render_yaml()` outputs sorted-by-code deterministic YAML.
+- CLI: `python tools/sync_iso4217.py [--dry-run] [--list-one PATH] [--list-three PATH] [--output PATH]`.
+- PowerShell: `.\tools\sync_iso4217.ps1 [-DryRun]`.
+- Default output: `configs/reference/currency_catalog_iso4217.yaml`.
+
+### Tests
+
+- `tests/test_v2_foundations.py` — config v0/v2 backward compat, referential integrity (region/calendar/fx), Money quantization (USD/JPY/BHD), CurrencyCatalog historical lookup, LocalFXSource + FXService policy paths, Calendar weekend (sat_sun, fri_sat per acceptance fixture #3), inline overrides, local source, seeded Nager source, RegionRegistry resolution, default-region fallback, `ScenarioDates` semantics, plus three checks aligned with `v2_foundations_acceptance_fixtures.yaml`.
+- `tests/test_iso_sync.py` — pure-parser tests with synthetic XML covering N.A. skip, dedup, withdrawal-date normalization (`YYYY` / `YYYY-MM` / full), merge precedence, deterministic render, diff_against_existing.
+- Total: **85 passing** (was 47 before this build).
+
+### Deferred / out-of-scope confirmed by spec
+
+- No v3 transaction-pipeline action/fee/posting/movement work.
+- No UI changes (TUI doesn't render Money objects yet — pending pipeline integration).
+- Engine still emits raw scalar amounts via `_build_summary` / `ActionOutcome`; the Money domain is a foundation other modules will adopt at the v3 boundary.
+- Frankfurter / Nager.Date HTTP integration is implemented but lazy — tests bypass via `seed_cache(...)` / `seed_year(...)` to stay offline and deterministic.

@@ -203,6 +203,30 @@ async def test_scenario_c_api_does_not_bypass_agent_loop():
 # ------------------------------------------------------------------ basic tick sequence
 
 @pytest.mark.asyncio
+async def test_onboarded_count_never_exceeds_pop_count():
+    """Stock-flow cap (spec 31-agents §pops, spec 40 §pops): onboarded_count
+    must stay <= pop_count at runtime, not just at config load. Regression
+    against the bug where 541 ticks of 3% onboard against pop=10000 produced
+    150k onboarded customers.
+    """
+    engine = make_engine()
+    pop = engine.model.pops["pop_main"]
+    cap = float(pop.pop_count)
+    for _ in range(50):  # >> 1/daily_onboard so saturation is reached
+        await engine._run_one_tick(next_day_mode=True)
+    snap = engine.build_snapshot()
+    p = snap["vendors"]["vendor_alpha"]["products"]["prod_prepaid_alpha"]
+    assert p["onboarded_pop_count"] <= int(cap), (
+        f"onboarded_pop_count={p['onboarded_pop_count']} exceeds pop_count cap={int(cap)}"
+    )
+    for pop_snap in snap["pops"].values():
+        for link in pop_snap["product_links"]:
+            assert link["onboarded_count"] <= int(cap), (
+                f"link onboarded_count={link['onboarded_count']} exceeds pop_count cap={int(cap)}"
+            )
+
+
+@pytest.mark.asyncio
 async def test_onboard_then_transact_ordering():
     """Onboard runs before Transact within the same tick.
 

@@ -40,6 +40,9 @@ class StatusBar(Static):
     intake_frozen: reactive[bool] = reactive(False)
     countdown: reactive[str] = reactive("")
     world_generation: reactive[int] = reactive(0)
+    # v2 foundations (spec 40 §scenario.start_date, §money): scenario date + currency context.
+    simulation_date: reactive[str] = reactive("")
+    default_currency: reactive[str] = reactive("")
 
     def render(self) -> str:
         if self.intake_frozen:
@@ -63,15 +66,19 @@ class StatusBar(Static):
         mode_label = self.run_mode.replace("_", " ").upper()
         mode_str = f"[bold {color}]{mode_label}[/]"
 
+        date_str = f"  Date: [bold]{self.simulation_date}[/]" if self.simulation_date else ""
+        ccy_str = f"  [dim]{self.default_currency}[/]" if self.default_currency else ""
         countdown_str = f"  [dim]{self.countdown}[/]" if self.countdown else ""
         gen_str = f"  [dim]gen={self.world_generation}[/]"
 
         return (
             f"[bold]Payments Mogul[/]  "
-            f"Tick: [bold]{self.tick_id}[/]  "
+            f"Tick: [bold]{self.tick_id}[/]"
+            f"{date_str}  "
             f"Mode: {mode_str}  "
             f"Intake: {intake_str}"
             f"{countdown_str}"
+            f"{ccy_str}"
             f"{gen_str}"
         )
 
@@ -297,6 +304,20 @@ class MogulApp(App):
             return str(value)
 
     def _fmt_amount(self, value) -> str:
+        """Render an amount payload.
+
+        v2 mode: server emits {"amount": "...", "currency": "USD"} per
+        spec 40 §money + critical contract decision #1 (no scalar fallback).
+        Render as `12.34 USD`. v0 mode: scalar float, render with the
+        configured decimal scale.
+        """
+        if isinstance(value, dict) and "amount" in value:
+            ccy = value.get("currency", "")
+            try:
+                amt = f"{float(value['amount']):,.{self._amount_scale_dp}f}"
+            except (TypeError, ValueError):
+                amt = str(value["amount"])
+            return f"{amt} {ccy}".rstrip()
         try:
             return f"{float(value):,.{self._amount_scale_dp}f}"
         except (TypeError, ValueError):
@@ -386,8 +407,14 @@ class MogulApp(App):
             self._tick_committed_at = time.monotonic()
             self._inter_tick_wait_ms = int(data.get("inter_tick_wait_ms", 0))
             tick = data.get("tick_id", "?")
+            sim_date = data.get("simulation_date")
+            if sim_date:
+                # Roll forward the date display immediately on tick commit so the
+                # status bar doesn't lag a tick behind.
+                status.simulation_date = sim_date
+            date_str = f" [{sim_date}]" if sim_date else ""
             self._log_line(
-                f"[cyan]tick_committed[/] T{tick} "
+                f"[cyan]tick_committed[/] T{tick}{date_str} "
                 f"ob_acc={self._fmt_count(data.get('onboard_accepted', 0))} "
                 f"tx_ok={self._fmt_count(data.get('transact_succeeded', 0))} "
                 f"amt={self._fmt_amount(data.get('transact_amount', 0))} "
@@ -516,6 +543,9 @@ class MogulApp(App):
         status.intake_open = snap.get("intake_open", False)
         status.intake_frozen = snap.get("intake_frozen", False)
         status.world_generation = snap.get("world_generation", 0)
+        # v2 foundations (spec 40): scenario time + currency context.
+        status.simulation_date = snap.get("simulation_date") or ""
+        status.default_currency = snap.get("default_currency") or ""
 
         if status.intake_frozen:
             rem = snap.get("intake_remaining_ms") or 0

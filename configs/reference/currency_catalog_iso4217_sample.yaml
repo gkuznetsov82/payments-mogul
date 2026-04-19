@@ -1,0 +1,50 @@
+# ISO 4217 currency catalog shape for v2 foundations.
+# Source of truth for production population: SIX ISO 4217 List One (current)
+# and List Three (historical). This file is a schema/example subset.
+catalog_version: "iso4217-sample-v1"
+source:
+  provider: "SIX-ISO4217"
+  list_one_url: "https://www.six-group.com/dam/download/financial-information/data-center/iso-currrency/lists/list-one.xml"
+  list_three_url: "https://www.six-group.com/dam/download/financial-information/data-center/iso-currrency/lists/list-three.xml"
+  generated_at: "2026-04-19"
+  notes:
+    - "Populate all current and historical entries from the official lists for full catalog deployments."
+    - "Planned generation flow: run explicit sync script (for example tools/sync_iso4217.py) to rebuild this file from SIX lists."
+
+currencies:
+  - code: "USD"
+    numeric_code: "840"
+    name: "US Dollar"
+    minor_unit: 2
+    active_from: "1792-01-01"
+  - code: "EUR"
+    numeric_code: "978"
+    name: "Euro"
+    minor_unit: 2
+    active_from: "1999-01-01"
+  - code: "JPY"
+    numeric_code: "392"
+    name: "Yen"
+    minor_unit: 0
+    active_from: "1871-06-27"
+  - code: "BHD"
+    numeric_code: "048"
+    name: "Bahraini Dinar"
+    minor_unit: 3
+    active_from: "1965-10-16"
+  - code: "SAR"
+    numeric_code: "682"
+    name: "Saudi Riyal"
+    minor_unit: 2
+    active_from: "1925-01-01"
+  - code: "GBP"
+    numeric_code: "826"
+    name: "Pound Sterling"
+    minor_unit: 2
+    active_from: "1694-07-27"
+  - code: "BGN"
+    numeric_code: "975"
+    name: "Bulgarian Lev"
+    minor_unit: 2
+    active_from: "1999-07-05"
+    active_to: "2025-12-31"

@@ -13,6 +13,23 @@ Full pitch and non-goals: `docs/spec/00-overview.md`.
 
 ---
 
+## Role boundaries (persistent)
+
+This project uses a strict separation of responsibilities:
+
+- **Codex agent (this assistant)**
+  - Acts as **System Architect + Business Analyst** only.
+  - Owns requirements analysis, spec authoring/refinement, versioning strategy, and acceptance criteria definition.
+  - Must **not** implement runtime/code/config changes.
+  - Must **not** propose implementation task breakdowns unless explicitly requested for Claude handoff.
+- **Claude**
+  - Owns all software implementation work: code, config wiring, tests, and runtime behavior changes.
+  - Executes only against approved numbered specs and explicit handoff notes.
+
+If there is ambiguity between spec intent and implementation detail, route back to spec clarification first.
+
+---
+
 ## Read the specs before touching code
 
 Specs live in `docs/spec/` (flat numbered files). Read them in this order for any implementation work:
@@ -124,6 +141,25 @@ These codes must be returned exactly as written. Do not rename or add prefixes.
 | `E_INTAKE_EXCEEDS_TICK` | `intake_window_ms > tick_wall_clock_base_ms` (when total > 0) |
 | `E_ROUNDING_MODE_INVALID` | `count_rounding_mode` or `amount_rounding_mode` not in the allowed set |
 | `E_AMOUNT_SCALE_INVALID` | `amount_scale_dp < 0` |
+| `E_START_DATE_INVALID` | `scenario.start_date` not `"today"` or `YYYY-MM-DD` |
+| `E_DEFAULT_CURRENCY_INVALID` | `money.default_currency` not ISO 4217 alpha-3 |
+| `E_CURRENCY_CATALOG_FORMAT_INVALID` | `currency_catalog.local_file.format` not `yaml`/`json` |
+| `E_FX_LOCAL_FORMAT_INVALID` | `fx.sources.local_file.format` not `yaml`/`json`/`csv` |
+| `E_FX_POLICY_INVALID` | `fx.source_policy` not in allowed set |
+| `E_FX_SOURCE_DUPLICATE` | duplicate `fx.frankfurter_sources[].source_id` |
+| `E_FX_SOURCE_REF_NOT_FOUND` | `fx.source_refs` entry has no matching `frankfurter_sources[].source_id` |
+| `E_FX_POLICY_SOURCE_MISMATCH` | `fx.source_policy` selects sources that aren't enabled/configured |
+| `E_FRANKFURTER_PROVIDER_UNRESOLVED` | Frankfurter source has neither `country_provider_map` nor `default_provider` |
+| `E_COUNTRY_CODE_INVALID` | ISO 3166-1 alpha-2 expected (`base_country` / `nager_date.country_code`) |
+| `E_WEEKEND_PROFILE_INVALID` | `calendars[].weekend_profile` not in `{sat_sun, fri_sat}` |
+| `E_HOLIDAY_POLICY_INVALID` | `calendars[].holiday_source_policy` not in allowed set |
+| `E_NON_WORKING_DATE_INVALID` | a value in `non_working_overrides` isn't a valid `YYYY-MM-DD` date |
+| `E_CALENDAR_DUPLICATE` | duplicate `calendars[].calendar_id` |
+| `E_CALENDAR_NOT_FOUND` | `regions[].calendar_id` references unknown calendar |
+| `E_REGION_DUPLICATE` | duplicate `regions[].region_id` |
+| `E_REGION_NOT_FOUND` | `world.vendor_agents[].region_id` / `world.pops[].region_id` references unknown region |
+| `E_AMOUNT_CURRENCY_WITHOUT_MONEY` | pop authored `daily_transact_amount` as money-object but `money.default_currency` not set |
+| `E_AMOUNT_CURRENCY_MISMATCH` | pop `daily_transact_amount.currency` ≠ `money.default_currency` |
 
 Warnings (`W_*`) are non-blocking. Hard errors (`E_*`) must prevent run start.
 

@@ -49,6 +49,12 @@ Count and quantity fields inside lifecycle/outcome/snapshot payloads must follow
 - Person and transaction counts are emitted as integers.
 - Amount fields use configured amount scale/rounding from **`40-yaml-config.md`**.
 
+Date and currency visibility fields are required for TUI/operator readability:
+
+- `simulation_date` (`YYYY-MM-DD`) should be present in `tick_committed` and `state_snapshot`.
+- `default_currency` (ISO 4217 alpha-3) should be present in `state_snapshot` (or nested config block).
+- Amount-bearing events should include explicit currency context via money objects.
+
 ### Additional prototype events
 
 - `command_ack` (accepted/rejected + target tick metadata)
@@ -59,6 +65,45 @@ Count and quantity fields inside lifecycle/outcome/snapshot payloads must follow
 - `world_restarting` (reload requested and accepted; old world draining)
 - `world_restarted` (new world initialized; includes new baseline tick/snapshot generation id)
 - `server_shutdown` (server is intentionally going down; includes reason and reconnect hint)
+
+### Pipeline observability event family (required for TUI operator views)
+
+To support pipeline/ledger observability sections in **`60-screen-specs.md`**, stream must expose compact events (or equivalent snapshot substructures) for:
+
+- `transaction_intent_event`
+  - intent creation/routing details, source product, destination role/product, value date policy + resolved date.
+- `fee_accrual_event`
+  - fee id, beneficiary role/product, amount components (`count_cost`, `amount_percentage`), accrual status.
+- `value_transfer_event`
+  - source/destination container refs, amount, value date policy + resolved date, execution status.
+- `posting_entry_event`
+  - source/destination ledger refs, debit/credit amount, posting date/status.
+- `invoice_transaction_event`
+  - emitted at due date for deferred settlement (`next_month_day_plus_x`), including payer/beneficiary context.
+- `settlement_resolution_event`
+  - invoice resolution mode (`paid` or `netted`), settled amount, residual amount (if any), final status.
+
+Event payloads should include consistent correlation keys for cross-view drill-down:
+
+- `tick_id`
+- `simulation_date`
+- `pipeline_profile_id`
+- `product_id`
+- one or more of `intent_id`, `trigger_id`, `fee_id`, `invoice_id`
+
+### Payload minimums for date/currency visibility
+
+- `tick_committed` minimum extension:
+  - `tick_id`
+  - `simulation_date`
+  - amount-bearing fields with explicit currency context
+- `state_snapshot` minimum extension:
+  - `tick_id`
+  - `simulation_date`
+  - `scenario_start_date_resolved`
+  - `default_currency`
+  - `config.amount_scale_dp`
+  - `config.amount_rounding_mode`
 
 ### Ordering requirement
 

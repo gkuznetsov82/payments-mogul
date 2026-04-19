@@ -78,7 +78,14 @@ class GenericPop(mesa.Agent):
             )
 
     def Onboard(self) -> None:
-        """Mesa step entrypoint: generate onboarding requests for known product links."""
+        """Mesa step entrypoint: generate onboarding requests for known product links.
+
+        Stock-flow contract (spec 31-agents §pops, spec 40 §pops):
+        - `daily_onboard` is the share of `pop_count` attempting per tick.
+        - `onboarded_count` MUST stay <= `pop_count` at runtime, not just at config load.
+        - Once a link is saturated (onboarded_count >= pop_count) the pop emits no
+          further requests for that link; vendor sees no traffic for it.
+        """
         tick_id = self.model.steps
         vendors = self.model.vendors
         for vendor_id in sorted(self.products.keys()):
@@ -89,9 +96,19 @@ class GenericPop(mesa.Agent):
                 link = self.products[vendor_id][product_id]
                 if not link.known:
                     continue
-                requested = self.pop_count * self.daily_onboard
+                # Cap the request at remaining unonboarded headroom for this link.
+                remaining = max(0.0, float(self.pop_count) - link.onboarded_count)
+                if remaining <= 0:
+                    continue  # link saturated — no more onboarding traffic
+                attempts = self.pop_count * self.daily_onboard
+                requested = min(attempts, remaining)
                 result = vendor.handle_onboard_from_pop(self.pop_id, product_id, requested)
-                link.onboarded_count += result.accepted_pop_count
+                # Belt-and-suspenders: never let the running count exceed the cap,
+                # even if friction sampling somehow returned more than requested.
+                link.onboarded_count = min(
+                    link.onboarded_count + result.accepted_pop_count,
+                    float(self.pop_count),
+                )
                 status = "accepted" if result.accepted_pop_count > 0 else "rejected"
                 self.model.record_outcome(ActionOutcome(
                     tick_id=tick_id,

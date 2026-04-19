@@ -1,0 +1,64 @@
+schema_version: "v2-foundations-acceptance-v1"
+checks:
+  - id: "money_minor_unit_enforced"
+    description: "Money amount quantizes to minor_unit from catalog."
+    input:
+      amount: "10.127"
+      currency: "USD"
+      minor_unit: 2
+      rounding_mode: "half_up"
+    expected_output:
+      amount: "10.13"
+      currency: "USD"
+
+  - id: "money_object_required_no_scalar_fallback"
+    description: "Amount-bearing fields must use money object form in v2 foundations."
+    input:
+      pop_daily_transact_amount:
+        amount: "22.5"
+        currency: "USD"
+    expected_output:
+      schema_valid: true
+
+  - id: "fx_historical_local_lookup"
+    description: "Local FX source returns rate by date/base/quote."
+    input:
+      source_policy: "local_only"
+      date: "2026-01-01"
+      base: "EUR"
+      quote: "USD"
+    expected_output:
+      rate: "1.102500"
+      provider_id: "ECB"
+
+  - id: "calendar_region_assignment"
+    description: "Region resolves working day from assigned calendar."
+    input:
+      region_id: "region_gcc"
+      calendar_id: "cal_gcc_fri_sat"
+      date: "2026-04-24"
+      weekday: "fri"
+    expected_output:
+      is_working_day: false
+
+  - id: "fx_multi_frankfurter_sources"
+    description: "Scenario may reference multiple Frankfurter source definitions."
+    input:
+      source_policy: "frankfurter_only"
+      source_refs: ["frankfurter_ecb", "frankfurter_usfrb"]
+      requested_source_id: "frankfurter_usfrb"
+      base_country: "US"
+      base: "USD"
+      quote: "EUR"
+      date: "2026-01-02"
+    expected_output:
+      provider_id: "FED"
+
+  - id: "world_vendor_region_mapping"
+    description: "Vendor resolves calendar context through region_id mapping."
+    input:
+      vendor_id: "vendor_alpha"
+      vendor_region_id: "region_main"
+      region_calendar_id: "cal_global_default"
+    expected_output:
+      resolved_calendar_id: "cal_global_default"

@@ -21,7 +21,9 @@ from pathlib import Path
 from engine.agents.pop import ActionOutcome
 from engine.config.loader import ConfigValidationError, load_config
 from engine.config.models import PrototypeConfig
+from engine.money import CurrencyCatalog
 from engine.numeric import round_amount, round_count
+from engine.scenario import ScenarioDates
 from engine.simulation.model import PaymentsMogulModel
 
 
@@ -73,12 +75,72 @@ class SimulationEngine:
         # Task handles (so reload/shutdown can cancel them cleanly)
         self._continuous_task: asyncio.Task | None = None
         self._next_day_task: asyncio.Task | None = None
+        # v2 foundations runtime context (spec 40 §scenario.start_date, §money,
+        # §currency_catalog). Populated from optional config sections; in v0
+        # configs these stay at sensible defaults.
+        self._scenario_dates: ScenarioDates = ScenarioDates.from_config(
+            cfg.scenario.start_date if cfg.scenario.start_date else None
+        )
+        self._currency_catalog: CurrencyCatalog | None = self._load_currency_catalog(cfg, config_path)
+        self.money_object_mode: bool = bool(
+            cfg.money is not None and cfg.money.enforce_money_object
+        )
+        self.default_currency: str | None = cfg.money.default_currency if cfg.money else None
+
+    @staticmethod
+    def _load_currency_catalog(cfg: PrototypeConfig,
+                                config_path: Path | None) -> CurrencyCatalog | None:
+        if cfg.currency_catalog is None:
+            return None
+        # Catalog path is relative to repo root or absolute. Resolve relative to
+        # config_path's parent if config_path is set.
+        path = Path(cfg.currency_catalog.local_file.path)
+        if not path.is_absolute() and config_path is not None:
+            # Try relative to repo root (parent of configs/) first since the spec's
+            # example paths read like "configs/reference/...".
+            candidates = [
+                Path.cwd() / path,
+                config_path.parent.parent / path if config_path.parent.name == "configs" else None,
+            ]
+            for c in candidates:
+                if c is not None and c.exists():
+                    path = c
+                    break
+        return CurrencyCatalog.from_file(path, fmt=cfg.currency_catalog.local_file.format)
 
     # ------------------------------------------------------------------ properties
 
     @property
     def tick_id(self) -> int:
         return self.model.steps
+
+    @property
+    def simulation_date(self):
+        """Date for the current tick per spec 40 §scenario.start_date."""
+        return self._scenario_dates.date_for_tick(self.tick_id)
+
+    @property
+    def scenario_start_date_resolved(self):
+        """Resolved scenario start date (after `today` resolution)."""
+        return self._scenario_dates.start_date
+
+    # ---- v2 amount payload helpers ----
+    # Spec 40/51/52 + critical contract decision #1: when money_object_mode is
+    # active, all externally-visible amount-bearing fields must be money objects
+    # `{amount, currency}`. v0 configs (no `money` section) keep scalar floats.
+
+    def _amount_payload(self, amount):
+        """Convert an internal scalar amount to the wire shape for this engine.
+
+        v2 mode -> {"amount": "<scaled string>", "currency": "USD"}
+        v0 mode -> rounded float (legacy)"""
+        sim = self.cfg.simulation
+        scaled = round_amount(float(amount or 0), sim.amount_scale_dp, sim.amount_rounding_mode)
+        if self.money_object_mode and self.default_currency:
+            # Format with fixed scale_dp decimals so the string round-trips losslessly.
+            fmt = f"{{:.{sim.amount_scale_dp}f}}"
+            return {"amount": fmt.format(scaled), "currency": self.default_currency}
+        return scaled
 
     @property
     def run_mode(self) -> str:
@@ -271,6 +333,15 @@ class SimulationEngine:
         self._next_day_event.clear()
         self._world_generation = next_gen
         self.state = EngineState.PAUSED
+        # Re-resolve v2 runtime context after reload (spec 40).
+        self._scenario_dates = ScenarioDates.from_config(
+            cfg.scenario.start_date if cfg.scenario.start_date else None
+        )
+        self._currency_catalog = self._load_currency_catalog(cfg, self.config_path)
+        self.money_object_mode = bool(
+            cfg.money is not None and cfg.money.enforce_money_object
+        )
+        self.default_currency = cfg.money.default_currency if cfg.money else None
 
         await self._emit("world_restarted", {
             "world_generation": self._world_generation,
@@ -425,12 +496,18 @@ class SimulationEngine:
         outcomes: list[ActionOutcome] = self.model._tick_outcomes
 
         sim = self.cfg.simulation
+        sim_date_iso = self.simulation_date.isoformat()
         for o in outcomes:
             d = o.as_dict(
                 count_mode=sim.count_rounding_mode,
                 amount_scale_dp=sim.amount_scale_dp,
                 amount_mode=sim.amount_rounding_mode,
             )
+            # v2: amount fields become money objects {amount, currency}; v0: scalar.
+            d["successful_total_amount"] = self._amount_payload(o.successful_total_amount)
+            d["failed_total_amount"] = self._amount_payload(o.failed_total_amount)
+            # Stamp the day this outcome belongs to (spec 40 §scenario.start_date).
+            d["simulation_date"] = sim_date_iso
             self._recent_outcomes.append(d)
             await self._emit("action_outcome", d)
 
@@ -450,6 +527,7 @@ class SimulationEngine:
         summary = self._build_summary(outcomes)
         await self._emit("tick_committed", {
             "tick_id": self.tick_id,
+            "simulation_date": self.simulation_date.isoformat(),
             "committed_at": time.time(),
             "inter_tick_wait_ms": inter_tick_wait_ms,
             **summary,
@@ -495,11 +573,23 @@ class SimulationEngine:
             "transact_requested": round_count(transact_req, cm),
             "transact_succeeded": round_count(transact_ok, cm),
             "transact_failed": round_count(transact_fail, cm),
-            "transact_amount": round_amount(transact_amt, sim.amount_scale_dp, sim.amount_rounding_mode),
+            # Amount routes through _amount_payload so v2 mode emits money objects.
+            "transact_amount": self._amount_payload(transact_amt),
         }
 
     def build_snapshot(self) -> dict:
         snap = self.model.snapshot()
+        sim = self.cfg.simulation
+        # In v2 money mode, rewrite product successful_transact_amount as money
+        # objects (spec 40 §money + critical contract decision #1: no scalar
+        # fallback in v2).
+        if self.money_object_mode:
+            for vid, v in snap.get("vendors", {}).items():
+                for pid, p in v.get("products", {}).items():
+                    if "successful_transact_amount" in p:
+                        p["successful_transact_amount"] = self._amount_payload(
+                            p["successful_transact_amount"]
+                        )
         return {
             "tick_id": self.tick_id,
             "engine_state": self.state.value,
@@ -508,9 +598,17 @@ class SimulationEngine:
             "intake_frozen": self._intake_frozen,
             "intake_remaining_ms": self._intake_remaining_ms if self._intake_frozen else None,
             "world_generation": self._world_generation,
+            # v2 foundations: scenario time + currency context (spec 40, 51 §Numeric, 52).
+            "simulation_date": self.simulation_date.isoformat(),
+            "scenario_start_date_resolved": self.scenario_start_date_resolved.isoformat(),
+            "default_currency": self.default_currency,
+            "money_object_mode": self.money_object_mode,
             "config": {
-                "intake_window_ms": self.cfg.simulation.intake_window_ms,
-                "tick_wall_clock_base_ms": self.cfg.simulation.tick_wall_clock_base_ms,
+                "intake_window_ms": sim.intake_window_ms,
+                "tick_wall_clock_base_ms": sim.tick_wall_clock_base_ms,
+                "amount_scale_dp": sim.amount_scale_dp,
+                "amount_rounding_mode": sim.amount_rounding_mode,
+                "count_rounding_mode": sim.count_rounding_mode,
             },
             **snap,
             "recent_outcomes": list(self._recent_outcomes[-20:]),
