@@ -1,7 +1,7 @@
 # Simulation Architecture
 
 **Status:** Draft
-**Binding level:** Mixed (`v1` runtime-binding baseline, `v2` spec-only extensions, `v3` runtime-target)
+**Binding level:** Mixed (`v1` runtime-binding baseline, `v2` spec-only extensions, `v3` runtime-binding for promoted pipeline scope)
 
 ## Purpose
 
@@ -16,6 +16,7 @@ Engine boundaries: Mesa scheduling, **tick semantics** (one tick = one simulated
 - `v1` remains the active runtime architecture contract for `prototype_vendor_pop_v1`.
 - `v2_foundations` additions are architecture/spec contracts that may reserve fields and sequencing language but do not require runtime behavior change.
 - `v3_runtime` is the target where promoted pipeline stages become execution requirements.
+- Promotion note: transaction pipeline runtime promotion is approved in **ADR-0002** when `pipeline_schema_version == v3_runtime`.
 - Promotion criteria for any pipeline stage:
   - stage semantics are specified in **`33-transaction-pipeline.md`**,
   - config surface is locked in **`40-yaml-config.md`**,
@@ -27,8 +28,8 @@ Engine boundaries: Mesa scheduling, **tick semantics** (one tick = one simulated
 |---|---|---|---|
 | Tick lifecycle | Runtime-binding | Runtime-binding | Runtime-binding |
 | Agent `Onboard`/`Transact` order | Runtime-binding | Runtime-binding | Runtime-binding |
-| Full intent->fee->posting->transfer pipeline | Deferred | Spec-only contract | Runtime-binding target |
-| Debug detailed retention controls | Reserved/validated | Spec-level retention contract | Runtime-binding target |
+| Full intent->fee->posting->transfer pipeline | Deferred | Spec-only contract | Runtime-binding |
+| Debug detailed retention controls | Reserved/validated | Spec-level retention contract | Runtime-binding (queryable store required) |
 
 ---
 
@@ -36,7 +37,7 @@ Engine boundaries: Mesa scheduling, **tick semantics** (one tick = one simulated
 
 - **One tick = one simulated day.** Intra-day mechanics (authorization, clearing, settlement as modeled) run **within** that tick and produce **economic outcomes** for the day: volumes, fees, fund transfers, and **aggregated accounting postings** to institutional P&L/balance sheet and pop sinks (**`01-principles.md`** accounting boundary).
 - **Process order (conceptual):** world state at start of day → agent steps and exogenous inputs → aggregate transaction intents and pipeline stages (**`33-transaction-pipeline.md`**) → fee calculations (**`21-fee-economics.md`**) → fund movement per rails (**`20-payment-rails.md`**) → ledger postings → events/shocks (**`34-events-scheduler.md`**) → end-of-day snapshots and optional detailed logging (mode-dependent). Exact ordering for determinism must be **fixed and documented** in implementation; any parallelization must preserve bitwise or documented equivalence to a serial reference order.
-- For `v3_runtime` promotion, deterministic stage order is fixed as: intents -> fees -> postings -> asset transfers -> retention. Until promotion, this sequence is normative architecture guidance only.
+- Deterministic stage order for `v3_runtime` is fixed as: intents -> fees -> postings -> asset transfers -> retention.
 
 ### Start date and calendar boundary (v2 foundations spec)
 

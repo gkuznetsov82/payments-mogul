@@ -160,6 +160,22 @@ These codes must be returned exactly as written. Do not rename or add prefixes.
 | `E_REGION_NOT_FOUND` | `world.vendor_agents[].region_id` / `world.pops[].region_id` references unknown region |
 | `E_AMOUNT_CURRENCY_WITHOUT_MONEY` | pop authored `daily_transact_amount` as money-object but `money.default_currency` not set |
 | `E_AMOUNT_CURRENCY_MISMATCH` | pop `daily_transact_amount.currency` ≠ `money.default_currency` |
+| `E_INVALID_PRODUCT_CLASS` | `world.vendor_agents[].products[].product_class` not in `{GenericProduct, RetailPayment-Card-Prepaid, SinkProduct}` |
+| `E_PIPELINE_SCHEMA_VERSION_INVALID` | `pipeline.pipeline_schema_version` not in `{v2_foundations, v3_runtime}` |
+| `E_PIPELINE_PROFILE_DUPLICATE` | duplicate `pipeline.pipeline_profiles[].pipeline_profile_id` |
+| `E_PIPELINE_PROFILE_NOT_FOUND` | product `pipeline_profile_id` references unknown profile |
+| `E_PIPELINE_ROLE_UNRESOLVED` | profile path/destination references a role not bound in the product's `pipeline_role_bindings` |
+| `E_PIPELINE_ROLE_SELECTOR_INVALID` | role selector lacks exactly one of `{agent_id, product_id, local}` |
+| `E_VALUE_DATE_POLICY_INVALID` | `value_date_policy` not in spec set |
+| `E_VALUE_DATE_OFFSET_REQUIRED` | policy contains `plus_x` but no `value_date_offset_days`/`settlement_value_date_offset_days` set |
+| `E_LEDGER_REF_NOT_FOUND` | posting/map references undefined `ledger_ref` |
+| `E_CONTAINER_REF_NOT_FOUND` | asset_transfer/map references undefined `container_ref` |
+| `E_FEE_TRIGGER_UNKNOWN` | fee `trigger_ids` references unknown intent/outgoing-intent/earlier-fee |
+| `E_FEE_DRIVER_MISSING` | fee declares neither `count_cost`, `amount_percentage`, nor `formula_ref` |
+| `E_FEE_CURRENCY_INVALID` | fee `count_cost.currency` not ISO 4217 alpha-3 |
+| `E_LEDGER_NORMAL_SIDE_INVALID` | `normal_side` not `debit`/`credit` |
+| `E_MAPPING_MODE_INVALID` | `ledger_value_container_map.mapping_mode` not `one_to_one`/`aggregate` |
+| `E_CURRENCY_MODE_INVALID` | `currency_mode` not `inherit`/`fixed_currency`/`fx_convert` |
 
 Warnings (`W_*`) are non-blocking. Hard errors (`E_*`) must prevent run start.
 

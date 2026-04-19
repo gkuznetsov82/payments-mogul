@@ -1,7 +1,7 @@
 # Transaction Pipeline
 
 **Status:** Draft
-**Binding level:** Mixed (`v1` runtime-binding, `v2` spec-only, `v3` runtime-target)
+**Binding level:** Mixed (`v1` runtime-binding baseline, `v2` spec-only contract surface, `v3` runtime-binding for promoted pipeline scope)
 
 ## Purpose
 
@@ -22,6 +22,7 @@ Prototype sequencing note: Money/Calendar/FX schema work in v2 is documented in 
   - contract parity between this chapter and **`40-yaml-config.md`**,
   - deterministic stage-order statement in **`30-architecture.md`**,
   - explicit acceptance criteria in a handoff backlog for implementation.
+- Promotion note: transaction pipeline runtime promotion is approved in **ADR-0002** for profiles/configs that declare `pipeline_schema_version: v3_runtime`.
 
 ### Version gates
 
@@ -29,7 +30,7 @@ Prototype sequencing note: Money/Calendar/FX schema work in v2 is documented in 
 |---|---|---|
 | `v1` | Runtime-binding | Agent-owned onboarding/transact adjudication and minimal outputs |
 | `v2_foundations` | Spec-only | Canonical pipeline objects, routing/posting/transfer/fee schema contracts |
-| `v3_runtime` | Runtime-binding target | Full transaction-intent -> fees -> postings -> asset transfers execution |
+| `v3_runtime` | Runtime-binding | Full transaction-intent -> fees -> postings -> asset transfers execution + invoice-triggered deferred fee collection |
 
 ---
 
@@ -70,7 +71,7 @@ Prototype sequencing note: Money/Calendar/FX schema work in v2 is documented in 
 
 ---
 
-## Canonical pipeline artifacts (v2 spec-only)
+## Canonical pipeline artifacts (v2 contract, v3 runtime)
 
 These artifacts formalize the unstructured transaction-pipeline notes and are not runtime-mandatory until promoted:
 
@@ -97,26 +98,29 @@ These artifacts formalize the unstructured transaction-pipeline notes and are no
   - reconciliation map linking ledger nodes to value containers.
   - supports aggregate mappings (for example, settlement-funds ledgers mapping to per-agent settlement containers).
 
-### Role-based reference resolution (v2 spec-only)
+### Role-based reference resolution (v2 contract, v3 runtime)
 
 - Pipeline configuration must be reusable across product instances; therefore pipeline rules must reference roles rather than concrete `agent_id` or `product_id`.
 - Resolution of roles to concrete IDs is owned by product-instance config in **`40-yaml-config.md`**.
 - Role resolution must occur before generating `PostingEntry` and `AssetTransfer` artifacts for a tick.
 - Ledger path construction for posting is defined by config-level ledger construction contracts in **`40-yaml-config.md`** (not only by ledger-to-container mapping).
 
-### Product-owned pipelines and inter-product handoff (v2 spec-only)
+### Product-owned pipelines and inter-product handoff (v2 contract, v3 runtime)
 
 - Pipeline execution is attached **per product instance**. Each product owns one pipeline profile.
 - A pipeline profile can be reused by multiple products, but execution context is always the owning product.
 - When Product A emits outgoing `TransactionIntent` to Product B (via resolved destination role), Product B's attached pipeline becomes responsible for downstream fee and settlement logic for that intent.
 - This preserves the agent-owned principle: each agent/product computes and executes its own obligations.
+- Destination-product handoff contract:
+  - destination product receives `Transact()` call with originating `vendor_id` in `client_id`,
+  - remaining parameters carry the routed transaction-intent details (intent id, amounts, currency, value-date policy/offset, and other required metadata),
+  - destination product pipeline executes from that received context.
 
-### Invoice-triggered fee settlement (v2 spec-only)
+### Invoice-triggered fee settlement (v2 contract, v3 runtime)
 
 - For fee contracts that settle on `next_month_day_plus_x`, beneficiary side emits an `InvoiceTransactionEvent` on the due date.
 - The invoice event triggers payer-side settlement handling in one of two modes:
-  - pay invoice directly, or
-  - net invoice against settlement amounts already owed (if configured).
+  - pay invoice directly.
 - Fee accrual and fee collection are separate lifecycle steps:
   - accrual occurs when fee is computed,
   - collection occurs when invoice event is generated/reconciled at due date.

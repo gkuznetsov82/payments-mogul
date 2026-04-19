@@ -33,12 +33,51 @@ class FrictionRange(BaseModel):
         return self
 
 
+_ALLOWED_PRODUCT_CLASSES = ("GenericProduct", "RetailPayment-Card-Prepaid", "SinkProduct")
+
+
+class PipelineRoleSelector(BaseModel):
+    """Resolves a symbolic role to a concrete agent_id, product_id, or local sink."""
+    agent_id: Optional[str] = None
+    product_id: Optional[str] = None
+    local: Optional[bool] = None
+
+    @model_validator(mode="after")
+    def exactly_one_target(self) -> "PipelineRoleSelector":
+        present = sum(1 for v in (self.agent_id, self.product_id, self.local) if v)
+        if present != 1:
+            raise ValueError(
+                "E_PIPELINE_ROLE_SELECTOR_INVALID: selector must set exactly one of "
+                "{agent_id, product_id, local}"
+            )
+        return self
+
+
+class PipelineRoleBindings(BaseModel):
+    """Per-product-instance binding from symbolic role names to concrete refs."""
+    entity_roles: dict[str, PipelineRoleSelector] = {}
+    default_product_role: Optional[str] = None
+
+
 class ProductConfig(BaseModel):
     product_id: str
     product_label: str
     product_class: str
     onboarding_friction: Optional[FrictionRange] = None
     transaction_friction: Optional[FrictionRange] = None
+    # v3_runtime: per-product pipeline binding (spec 40 §pipeline, ADR-0002).
+    pipeline_profile_id: Optional[str] = None
+    pipeline_role_bindings: Optional[PipelineRoleBindings] = None
+
+    @field_validator("product_class")
+    @classmethod
+    def known_product_class(cls, v: str) -> str:
+        if v not in _ALLOWED_PRODUCT_CLASSES:
+            raise ValueError(
+                f"E_INVALID_PRODUCT_CLASS: product_class must be one of "
+                f"{_ALLOWED_PRODUCT_CLASSES}, got '{v}'"
+            )
+        return v
 
 
 class VendorAgentConfig(BaseModel):
@@ -458,6 +497,244 @@ class RegionConfig(BaseModel):
     label: Optional[str] = None
 
 
+# =============================================================================
+# v2/v3 pipeline contracts (spec 40 §pipeline, ADR-0002)
+# Runtime-binding when pipeline_schema_version == "v3_runtime".
+# =============================================================================
+
+
+_VALUE_DATE_POLICIES = (
+    "same_day",
+    "next_day_plus_x",
+    "next_working_day_plus_x",
+    "next_month_day_plus_x",
+)
+_PIPELINE_SCHEMA_VERSIONS = ("v2_foundations", "v3_runtime")
+_CURRENCY_MODES = ("inherit", "fixed_currency", "fx_convert")
+
+
+def _check_offset_for_policy(policy: str, offset: Optional[int], field_label: str) -> None:
+    """Spec 40 §Value-date offset rules: when policy contains plus_x, offset is required."""
+    requires = "plus_x" in policy
+    if requires and offset is None:
+        raise ValueError(
+            f"E_VALUE_DATE_OFFSET_REQUIRED: {field_label} requires an offset when "
+            f"policy is '{policy}'"
+        )
+
+
+class FeeAmountInput(BaseModel):
+    """Money-object input form for fee count_cost (spec 40)."""
+    amount: float
+    currency: str
+
+    @field_validator("currency")
+    @classmethod
+    def iso_alpha3(cls, v: str) -> str:
+        if not _ISO_4217_ALPHA3.match(v):
+            raise ValueError(
+                f"E_FEE_CURRENCY_INVALID: fee currency must be ISO 4217 alpha-3, got '{v}'"
+            )
+        return v
+
+
+class TransactionDestinationConfig(BaseModel):
+    destination_role: str
+    outgoing_intent_id: str
+    value_date_policy: str
+    value_date_offset_days: Optional[int] = None
+    amount_basis: str = "transaction_intent_amount"
+    currency_mode: str = "inherit"
+
+    @field_validator("value_date_policy")
+    @classmethod
+    def known_policy(cls, v: str) -> str:
+        if v not in _VALUE_DATE_POLICIES:
+            raise ValueError(
+                f"E_VALUE_DATE_POLICY_INVALID: must be one of {_VALUE_DATE_POLICIES}, got '{v}'"
+            )
+        return v
+
+    @field_validator("currency_mode")
+    @classmethod
+    def known_currency_mode(cls, v: str) -> str:
+        if v not in _CURRENCY_MODES:
+            raise ValueError(
+                f"E_CURRENCY_MODE_INVALID: must be one of {_CURRENCY_MODES}, got '{v}'"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def offset_required_for_plus_x(self) -> "TransactionDestinationConfig":
+        _check_offset_for_policy(self.value_date_policy, self.value_date_offset_days,
+                                  "destination.value_date_offset_days")
+        return self
+
+
+class TransactionIntentConfig(BaseModel):
+    intent_id: str
+    destinations: list[TransactionDestinationConfig] = []
+
+
+class LedgerConstructionConfig(BaseModel):
+    ledger_ref: str
+    path_pattern: str
+    normal_side: Optional[str] = None
+
+    @field_validator("normal_side")
+    @classmethod
+    def known_side(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in ("debit", "credit"):
+            raise ValueError(
+                f"E_LEDGER_NORMAL_SIDE_INVALID: normal_side must be debit|credit, got '{v}'"
+            )
+        return v
+
+
+class PostingRuleConfig(BaseModel):
+    trigger_id: str
+    source_ledger_ref: str
+    destination_ledger_ref: str
+    amount_basis: str = "transaction_intent_amount"
+    value_date_policy: str
+    value_date_offset_days: Optional[int] = None
+
+    @field_validator("value_date_policy")
+    @classmethod
+    def known_policy(cls, v: str) -> str:
+        if v not in _VALUE_DATE_POLICIES:
+            raise ValueError(
+                f"E_VALUE_DATE_POLICY_INVALID: must be one of {_VALUE_DATE_POLICIES}, got '{v}'"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def offset_required(self) -> "PostingRuleConfig":
+        _check_offset_for_policy(self.value_date_policy, self.value_date_offset_days,
+                                  "posting_rules.value_date_offset_days")
+        return self
+
+
+class ValueContainerConstructionConfig(BaseModel):
+    container_ref: str
+    path_pattern: str
+
+
+class AssetTransferRuleConfig(BaseModel):
+    trigger_id: str
+    source_container_ref: str
+    destination_container_ref: str
+    amount_basis: str = "transaction_intent_amount"
+    value_date_policy: str
+    value_date_offset_days: Optional[int] = None
+
+    @field_validator("value_date_policy")
+    @classmethod
+    def known_policy(cls, v: str) -> str:
+        if v not in _VALUE_DATE_POLICIES:
+            raise ValueError(
+                f"E_VALUE_DATE_POLICY_INVALID: must be one of {_VALUE_DATE_POLICIES}, got '{v}'"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def offset_required(self) -> "AssetTransferRuleConfig":
+        _check_offset_for_policy(self.value_date_policy, self.value_date_offset_days,
+                                  "asset_transfer_rules.value_date_offset_days")
+        return self
+
+
+class FeeConfig(BaseModel):
+    fee_id: str
+    trigger_ids: list[str] = []
+    beneficiary_role: str
+    beneficiary_product_role: Optional[str] = None
+    settlement_value_date_policy: str
+    settlement_value_date_offset_days: Optional[int] = None
+    settlement_trigger_event: Optional[str] = None
+    allow_settlement_netting: Optional[bool] = None
+    filter: Optional[dict] = None
+    count_cost: Optional[FeeAmountInput] = None
+    amount_percentage: Optional[float] = None
+    formula_ref: Optional[str] = None
+
+    @field_validator("settlement_value_date_policy")
+    @classmethod
+    def known_policy(cls, v: str) -> str:
+        if v not in _VALUE_DATE_POLICIES:
+            raise ValueError(
+                f"E_VALUE_DATE_POLICY_INVALID: must be one of {_VALUE_DATE_POLICIES}, got '{v}'"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def settlement_offset_required(self) -> "FeeConfig":
+        _check_offset_for_policy(self.settlement_value_date_policy,
+                                  self.settlement_value_date_offset_days,
+                                  "fees.settlement_value_date_offset_days")
+        # At least one amount driver required (spec 40: count_cost / amount_percentage / formula_ref)
+        drivers = [self.count_cost is not None,
+                   self.amount_percentage is not None,
+                   self.formula_ref is not None]
+        if not any(drivers):
+            raise ValueError(
+                "E_FEE_DRIVER_MISSING: fee must declare at least one of "
+                "count_cost / amount_percentage / formula_ref"
+            )
+        return self
+
+
+class FeeSequenceConfig(BaseModel):
+    sequence_id: str
+    fees: list[FeeConfig] = []
+
+
+class LedgerValueContainerMapConfig(BaseModel):
+    ledger_ref: str
+    container_ref: str
+    mapping_mode: str = "one_to_one"
+
+    @field_validator("mapping_mode")
+    @classmethod
+    def known_mode(cls, v: str) -> str:
+        if v not in ("one_to_one", "aggregate"):
+            raise ValueError(
+                f"E_MAPPING_MODE_INVALID: must be one_to_one|aggregate, got '{v}'"
+            )
+        return v
+
+
+class PipelineProfileConfig(BaseModel):
+    pipeline_profile_id: str
+    transaction_intents: list[TransactionIntentConfig] = []
+    ledger_construction: list[LedgerConstructionConfig] = []
+    posting_rules: list[PostingRuleConfig] = []
+    value_container_construction: list[ValueContainerConstructionConfig] = []
+    asset_transfer_rules: list[AssetTransferRuleConfig] = []
+    fee_sequences: list[FeeSequenceConfig] = []
+    ledger_value_container_map: list[LedgerValueContainerMapConfig] = []
+
+
+class PipelineConfig(BaseModel):
+    pipeline_schema_version: str
+    pipeline_profiles: list[PipelineProfileConfig] = []
+
+    @field_validator("pipeline_schema_version")
+    @classmethod
+    def known_version(cls, v: str) -> str:
+        if v not in _PIPELINE_SCHEMA_VERSIONS:
+            raise ValueError(
+                f"E_PIPELINE_SCHEMA_VERSION_INVALID: must be one of "
+                f"{_PIPELINE_SCHEMA_VERSIONS}, got '{v}'"
+            )
+        return v
+
+    @property
+    def is_runtime(self) -> bool:
+        """ADR-0002 gating: runtime-binding only when v3_runtime is declared."""
+        return self.pipeline_schema_version == "v3_runtime"
+
+
 class PrototypeConfig(BaseModel):
     config_version: str
     scenario: ScenarioConfig
@@ -470,3 +747,4 @@ class PrototypeConfig(BaseModel):
     fx: Optional[FXConfig] = None
     calendars: list[CalendarConfig] = []
     regions: list[RegionConfig] = []
+    pipeline: Optional[PipelineConfig] = None

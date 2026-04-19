@@ -1,7 +1,7 @@
 # YAML Configuration
 
 **Status:** Draft
-**Binding level:** Mixed (`v0/v1` runtime-binding core, `v2_foundations` spec-only extensions, `v3_runtime` target)
+**Binding level:** Mixed (`v0/v1` runtime-binding core, `v2_foundations` spec-only extensions, `v3_runtime` runtime-binding for promoted pipeline scope)
 
 ## Purpose
 
@@ -19,11 +19,12 @@ This chapter also defines the **Prototype v2 foundations schema surface** for Mo
 - Introduce `pipeline_schema_version` under the pipeline section when pipeline config contracts are used.
 - Allowed pipeline schema values:
   - `v2_foundations` (spec-only, non-runtime-binding)
-  - `v3_runtime` (runtime-binding target after promotion)
+  - `v3_runtime` (runtime-binding)
 - Promotion of pipeline fields from reserved/spec-only to runtime-binding requires aligned updates in:
   - **`33-transaction-pipeline.md`** (behavior contract),
   - **`30-architecture.md`** (determinism/ordering contract),
   - this chapter (YAML contract and validation expectations).
+- Promotion note: transaction pipeline runtime promotion is approved in **ADR-0002** for configs declaring `pipeline_schema_version: v3_runtime`.
 
 ---
 
@@ -175,13 +176,13 @@ control_defaults:
   accepting_transact: true
 ```
 
-## Prototype v2 foundations extension (spec-only)
+## Prototype v2 foundations extension (+ v3 pipeline promotion)
 
-This section defines config contracts and YAML examples for v2 foundations only.
+This section defines config contracts and YAML examples for v2 foundations and promoted v3 pipeline runtime contracts.
 
-- Deliverables in this phase are limited to spec/schema and YAML examples.
-- Runtime implementation, migrations, and execution wiring are out of scope here.
-- Transaction pipeline buildout remains deferred to v3.
+- Deliverables include schema contracts and YAML examples.
+- Runtime implementation remains out of scope for v2 foundations fields unless explicitly promoted.
+- Transaction pipeline contracts are runtime-binding when `pipeline_schema_version: v3_runtime`.
 
 ### Additive top-level structure for v2
 
@@ -314,9 +315,9 @@ These fields reference `regions[].region_id`.
 - Agents spawned in a region inherit the region's assigned calendar by default.
 - An agent may override inherited calendar assignment via explicit config reference.
 
-### `pipeline` section (v2 foundations, spec-only)
+### `pipeline` section (v2 foundations + v3 runtime)
 
-This section formalizes transaction-pipeline config contracts for future runtime promotion and is non-binding for v2 execution.
+This section formalizes transaction-pipeline config contracts. Binding depends on `pipeline_schema_version`.
 
 - `pipeline_schema_version` (`string`) - `v2_foundations` or `v3_runtime`.
 - `pipeline_profiles` (`array[object]`) - reusable per-product pipeline definitions:
@@ -365,7 +366,6 @@ This section formalizes transaction-pipeline config contracts for future runtime
     - `settlement_value_date_policy` (`string`) - same allowed set as `value_date_policy`
     - `settlement_value_date_offset_days` (`integer`, `>= 0`) - required when settlement policy contains `plus_x`
     - `settlement_trigger_event` (`string`) - `invoice_transaction_event` for deferred fee collection
-    - optional `allow_settlement_netting` (`boolean`) - if true, beneficiary may net invoice amount against settlement amounts owed to payer
     - optional `filter` (`object`) - future transaction-detail selectors
     - one or more amount drivers:
       - `count_cost`
@@ -402,6 +402,15 @@ Role resolution is owned by the product instance so the same pipeline profile ca
 
 All role placeholders in pipeline path patterns and routing destinations must be resolvable from this mapping.
 
+#### Inter-product `Transact()` handoff contract
+
+When a transaction intent routes from Product A to Product B:
+
+- Product B receives `Transact()` with:
+  - `client_id` = upstream originating `vendor_id`,
+  - remaining parameters carrying routed transaction details (at minimum `intent_id`, amount/currency context, and value-date policy/offset).
+- Product B then executes its own attached `pipeline_profile_id` from that handoff context.
+
 #### Value-date offset rules (required)
 
 - If `value_date_policy` or `settlement_value_date_policy` contains `plus_x`, corresponding offset field is mandatory:
@@ -409,16 +418,16 @@ All role placeholders in pipeline path patterns and routing destinations must be
   - `settlement_value_date_offset_days`
 - For `same_day`, offset should be omitted or set to `0`.
 - For this iteration's sink-fee contracts (scheme and processor), settlement policy is `next_month_day_plus_x` with offset `5`.
-- For sink-fee settlement in this iteration, `settlement_trigger_event` must be `invoice_transaction_event` and collection may use either direct payment or configured netting.
+- For sink-fee settlement in this iteration, `settlement_trigger_event` must be `invoice_transaction_event` and collection uses direct payment after invoice issuance.
 
 #### Pipeline binding by schema version
 
 | `pipeline_schema_version` | Binding | Expected use |
 |---|---|---|
 | `v2_foundations` | Spec-only | Authoring, review, and fixture documentation |
-| `v3_runtime` | Runtime-binding target | Executable behavior after promotion approval |
+| `v3_runtime` | Runtime-binding | Executable behavior |
 
-### v2 schema example (illustrative, spec-only)
+### v3 runtime schema example (illustrative)
 
 ```yaml
 config_version: "v0"
@@ -487,7 +496,7 @@ regions:
     label: "Main Region"
 
 pipeline:
-  pipeline_schema_version: "v2_foundations"
+  pipeline_schema_version: "v3_runtime"
   pipeline_profiles:
     - pipeline_profile_id: "prepaid_card_pipeline"
       transaction_intents:
@@ -552,7 +561,6 @@ pipeline:
               settlement_value_date_policy: "next_month_day_plus_x"
               settlement_value_date_offset_days: 5
               settlement_trigger_event: "invoice_transaction_event"
-              allow_settlement_netting: true
               count_cost:
                 amount: 0.01
                 currency: "USD"
@@ -582,7 +590,6 @@ pipeline:
               settlement_value_date_policy: "next_month_day_plus_x"
               settlement_value_date_offset_days: 5
               settlement_trigger_event: "invoice_transaction_event"
-              allow_settlement_netting: true
               count_cost:
                 amount: 0.03
                 currency: "USD"
@@ -669,7 +676,7 @@ world:
 - Calendar supports both first-class holiday sources (`local_file`, `nager_date`) and explicit selection policy.
 - Region references calendar object; working-day rules remain in calendar object.
 - World entities may map to regions via `region_id`, enabling region-specific calendar context.
-- Fee settlement supports `invoice_transaction_event` for deferred collection (including optional settlement netting).
+- Fee settlement supports `invoice_transaction_event` for deferred collection via direct payment.
 - Example YAML files exist for currency catalog, local FX rates, and local calendar holiday overlays.
 
 ### Deferred beyond v0

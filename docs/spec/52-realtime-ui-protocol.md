@@ -81,7 +81,7 @@ To support pipeline/ledger observability sections in **`60-screen-specs.md`**, s
 - `invoice_transaction_event`
   - emitted at due date for deferred settlement (`next_month_day_plus_x`), including payer/beneficiary context.
 - `settlement_resolution_event`
-  - invoice resolution mode (`paid` or `netted`), settled amount, residual amount (if any), final status.
+  - invoice resolution mode (`paid`), settled amount, residual amount (if any), final status.
 
 Event payloads should include consistent correlation keys for cross-view drill-down:
 

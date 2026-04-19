@@ -44,10 +44,12 @@ logging.config.dictConfig({
     },
 })
 
-# v2 foundations runtime config: enables money-object mode, currency catalog,
-# regions/calendars/FX sections (spec 40 §Prototype v2 foundations).
-# Switch to "prototype_v0.yaml" if you want the legacy scalar-amount scenario.
-CONFIG_PATH = Path(__file__).parent.parent.parent / "configs" / "prototype_v2_foundations_example.yaml"
+# v3_runtime pipeline config (ADR-0002): prepaid -> scheme + processor sinks
+# with cross-profile fee accrual, deferred invoice settlement, ledger postings,
+# and value-container transfers. Switch to:
+#   - "prototype_v2_foundations_example.yaml" for v2 spec-only smoke run, or
+#   - "prototype_v0.yaml" for legacy scalar-amount scenario.
+CONFIG_PATH = Path(__file__).parent.parent.parent / "configs" / "prototype_v3_runtime_example.yaml"
 
 # Global engine instance (set on startup)
 _engine: SimulationEngine | None = None

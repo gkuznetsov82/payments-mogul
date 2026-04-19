@@ -66,7 +66,7 @@ Text-first presentation remains valid, but operator workflow must include focusa
   - `tick_id`, `simulation_date`, `product_id`, `pipeline_profile_id`,
   - `trigger_id` / `intent_id` / `fee_id`,
   - `value_date_policy` + offset and resolved due date,
-  - status (`accrued`, `invoiced`, `paid`, `netted`, `failed`).
+  - status (`accrued`, `invoiced`, `paid`, `failed`).
 - Required interactions:
   - filter by product, counterparty role, fee id, date range,
   - phase-order sort (intent -> fee -> posting -> transfer -> invoice/settlement),
@@ -89,10 +89,11 @@ Text-first presentation remains valid, but operator workflow must include focusa
 
 - Views must be keyboard-switchable as primary sections (tabs or equivalent).
 - Baseline required sections:
+  - `Run` (timing controls always visible in this section/header region)
   - `World`
   - `Pipeline`
   - `Ledger`
-  - existing controls/events panel(s) remain accessible from all sections.
+  - `Logs` (command/outcome/event stream; not required to be always visible).
 - If viewport is constrained, section switching may become paged, but all three sections remain reachable.
 
 This prototype UI remains text-first and does not require graphical chart rendering for this phase gate.
@@ -104,26 +105,25 @@ This prototype UI remains text-first and does not require graphical chart render
 - **Baseline target size:** `120x36` (columns x rows).
 - **Status/header row:** fixed top row; must always remain visible.
 - **Main area split (baseline):**
-  - left control pane width: `26-32` columns,
-  - right content pane: remaining width,
-  - right pane vertical fill: event log receives flexible growth.
-- **Recent Events panel sizing:**
-  - minimum height: `8` rows,
-  - preferred behavior: consume remaining free vertical space after status and essential summary blocks,
+  - top run-controls strip remains visible (Pause/Resume/Next Day/speed + tick/date),
+  - active section content consumes remaining viewport,
+  - logs are hosted in dedicated `Logs` section/tab.
+- **Logs section sizing:**
+  - minimum visible event list height: `12` rows,
   - must be vertically scrollable.
 
 ### Responsive behavior by viewport
 
-- `>=120x36`: two-pane layout (controls left, data/log right).
-- `100x28` to `119x35`: keep two panes but collapse low-priority blocks and allow control-pane scrolling.
-- `80x24` to `99x27`: single-column stacked layout; controls in grouped sections with scroll; event log below state block and still min `8` rows.
-- `<80x24`: compact fallback mode with explicit warning; only critical controls and event log shown first, secondary blocks behind a focusable details view.
+- `>=120x36`: tabbed/sectioned layout with always-visible run-controls strip and full section content.
+- `100x28` to `119x35`: keep sectioned layout; collapse low-priority blocks and allow content scrolling.
+- `80x24` to `99x27`: compact sectioned layout; prioritize run controls and current section data with explicit paging hints.
+- `<80x24`: compact fallback mode with explicit warning; run controls remain visible and sections become paged.
 
 ### Accessibility and operability constraints
 
-- Control pane and event log are both independently focusable scroll regions.
+- Active section content and logs view are independently focusable scroll regions.
 - If any control group overflows, render visible scroll hints (`more above/below` or equivalent indicator).
-- Tab order priority: run controls -> world controls -> command controls -> event log -> state/snapshot blocks.
+- Tab order priority: run controls -> section switcher -> active section controls -> active section content.
 - `ShutdownServer` must be keyboard reachable in all viewport classes.
 
 ### Tick timing display contract

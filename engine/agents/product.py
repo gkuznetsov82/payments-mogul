@@ -25,6 +25,18 @@ class TransactDecisionResult:
     reason_code: str
 
 
+@dataclass
+class TransactionDetails:
+    """Routed transaction details delivered by upstream vendor (spec 31, ADR-0002)."""
+    intent_id: str
+    parent_intent_id: str | None
+    txn_count: int
+    amount: float
+    currency: str
+    value_date_policy: str
+    value_date_offset_days: int | None
+
+
 class GenericProduct:
     """Accepts all valid requests under gate checks; no friction."""
 
@@ -44,6 +56,9 @@ class GenericProduct:
         self.onboarded_pop_count: float = 0.0
         self.successful_transact_count: float = 0.0
         self.successful_transact_amount: float = 0.0
+        # v3_runtime pipeline binding (spec 40 §pipeline + product_class).
+        self.cfg_profile_id: str | None = cfg.pipeline_profile_id
+        self.cfg_role_bindings = cfg.pipeline_role_bindings
 
     # Control methods — applied during tick_user_inputs_processed
     def close_onboarding(self) -> None:
@@ -104,6 +119,29 @@ class GenericProduct:
     ) -> tuple[float, float]:
         return requested_txn, requested_amt
 
+    def transact_product_from_upstream(
+        self,
+        client_id: str,
+        details: "TransactionDetails",
+    ) -> "TransactDecisionResult":
+        """Per ADR-0002: destination product handler for upstream-routed intents.
+
+        `client_id` is the originating upstream vendor_id (spec 31). Default
+        behavior: accept all upstream traffic (no friction), record txn count +
+        amount as accepted; fee/posting/transfer logic is then performed by the
+        engine's pipeline executor against this product's pipeline profile.
+        """
+        if not self.accepting_transact:
+            return TransactDecisionResult(
+                0.0, float(details.txn_count), 0.0, float(details.amount),
+                "TRANSACT_CLOSED",
+            )
+        self.successful_transact_count += details.txn_count
+        self.successful_transact_amount += details.amount
+        return TransactDecisionResult(
+            float(details.txn_count), 0.0, float(details.amount), 0.0, "OK_UPSTREAM",
+        )
+
     def snapshot(self,
                  count_mode: str = "half_up",
                  amount_scale_dp: int = 2,
@@ -150,6 +188,35 @@ class RetailPaymentCardPrepaid(GenericProduct):
         return requested_txn * rate, requested_amt * rate
 
 
+class SinkProduct(GenericProduct):
+    """Sink-style product (spec 31 §SinkProduct, ADR-0002).
+
+    Pop-origin onboard/transact paths return zero-effect results; the operational
+    path is `transact_product_from_upstream` (driven by inter-product handoff).
+    """
+
+    def onboard_product(
+        self,
+        pop_id: str,
+        requested_pop_count: float,
+        rng: random.Random,
+    ) -> OnboardDecisionResult:
+        return OnboardDecisionResult(0.0, requested_pop_count, "SINK_PRODUCT_NO_POP_TRAFFIC")
+
+    def transact_product(
+        self,
+        pop_id: str,
+        requested_pop_count: float,
+        requested_txn_count: float,
+        requested_total_amount: float,
+        rng: random.Random,
+    ) -> TransactDecisionResult:
+        return TransactDecisionResult(
+            0.0, requested_txn_count, 0.0, requested_total_amount,
+            "SINK_PRODUCT_NO_POP_TRAFFIC",
+        )
+
+
 def build_product(
     cfg: ProductConfig,
     owner_vendor_id: str,
@@ -158,4 +225,6 @@ def build_product(
 ) -> GenericProduct:
     if cfg.product_class == "RetailPayment-Card-Prepaid":
         return RetailPaymentCardPrepaid(cfg, owner_vendor_id, accepting_onboard, accepting_transact)
+    if cfg.product_class == "SinkProduct":
+        return SinkProduct(cfg, owner_vendor_id, accepting_onboard, accepting_transact)
     return GenericProduct(cfg, owner_vendor_id, accepting_onboard, accepting_transact)

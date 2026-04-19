@@ -65,6 +65,7 @@ This subsection defines the **minimum authoritative contracts** for `prototype_v
 - `Transact()` - Tick entrypoint. May be noop for this class.
 - `HandleOnboardFromPop(pop_id, product_id, requested_pop_count)` - Routes pop onboarding request to owned product handler.
 - `HandleTransactFromPop(pop_id, product_id, requested_pop_count, requested_txn_count, requested_total_amount)` - Routes pop transact request to owned product handler.
+- `HandleTransactFromVendor(client_id, product_id, transaction_details)` - Routes upstream vendor-originated transaction-intent handoff to owned product pipeline.
 
 #### Request-handler contract
 
@@ -106,6 +107,11 @@ Control methods are applied during `tick_user_inputs_processed` for the target t
   - Checks `requested_pop_count` against onboarded availability for the pop segment.
   - Returns success/failure counts and amounts with reason code.
   - Increments successful counters/amounts.
+- `TransactProductFromUpstream(client_id, transaction_details)` -> `TransactDecisionResult`
+  - Used for product-to-product handoff when destination product receives routed transaction intent.
+  - `client_id` is upstream originating `vendor_id`.
+  - `transaction_details` carries intent metadata and amount/value-date context.
+  - Execution continues in destination product's attached pipeline profile.
 
 #### Result payload shapes (normalized)
 
@@ -128,6 +134,17 @@ Counts must follow the deterministic rounding policy from **`30-architecture.md`
 - `transaction_friction` (`range<float>`) - Per-tick decline friction on requested transaction flow.
 
 `GenericProduct` accepts all valid requests under gate checks, while this subclass applies friction to reduce acceptance/success outcomes.
+
+### `SinkProduct` (extends `GenericProduct`, pipeline sink profile)
+
+`SinkProduct` is intended for products such as `Scheme-Access` and `Processor-Services` where value is captured from incoming routed intents rather than direct pop onboarding/transacting.
+
+#### Behavioral constraints
+
+- `OnboardProduct(...)` should reject or noop for pop-origin traffic.
+- `TransactProduct(...)` for pop-origin traffic should reject or noop.
+- `TransactProductFromUpstream(client_id, transaction_details)` is the primary operational path.
+- Sink products compute their own fee accruals and emit invoice-triggered collections per attached pipeline profile.
 
 ### `GenericPop` (prototype profile)
 

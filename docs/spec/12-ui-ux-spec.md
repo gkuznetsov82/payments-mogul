@@ -80,12 +80,14 @@ Information architecture and interaction design for the industrial / command-cen
 ### TUI information architecture extension (pipeline observability)
 
 - TUI should expose primary operator sections (tabs or equivalent):
+  - `Run` (timing controls; always visible strip/section),
   - `World` (comprehensive world view),
   - `Pipeline` (transactions/fees/value transfers),
   - `Ledger` (ledger/value-container/reconciliation),
-  - `Controls` (run + command interactions).
+  - `Controls` (command interactions),
+  - `Logs` (command/outcome/event stream).
 - Interaction objective: an operator can trace one transaction path from intent creation through fee accrual to posting/transfer and invoice settlement without leaving the TUI.
 - Expert workflow priority:
   - fast keyboard section switching,
   - consistent identifiers across sections (`tick_id`, `product_id`, `intent_id`, `fee_id`),
-  - visible status transitions for deferred settlement (`accrued -> invoiced -> paid/netted`).
+  - visible status transitions for deferred settlement (`accrued -> invoiced -> paid`).

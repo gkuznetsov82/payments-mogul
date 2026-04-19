@@ -1,0 +1,197 @@
+config_version: "v0"
+
+scenario:
+  id: "prototype_vendor_pop_v1"
+  seed: 424242
+  market_id: "market_local_v0"
+  start_date: "2026-01-01"
+
+simulation:
+  tick_wall_clock_base_ms: 0
+  debug_history_max_ticks: 30
+  debug_history_default_ticks: 7
+  intake_window_ms: 1
+  agent_method_order: ["Onboard", "Transact"]
+  agent_iteration_policy: "stable_sorted_ids"
+  count_rounding_mode: "half_up"
+  amount_scale_dp: 2
+  amount_rounding_mode: "half_up"
+
+money:
+  amount_rounding_mode: "half_up"
+  default_currency: "USD"
+  enforce_money_object: true
+
+pipeline:
+  pipeline_schema_version: "v3_runtime"
+  pipeline_profiles:
+    - pipeline_profile_id: "prepaid_card_pipeline"
+      transaction_intents:
+        - intent_id: "Transact-Purchase-Clearing"
+          destinations:
+            - destination_role: "scheme_access_product"
+              outgoing_intent_id: "Transact-Purchase-Clearing-Scheme"
+              value_date_policy: "same_day"
+              value_date_offset_days: 0
+              amount_basis: "transaction_intent_amount"
+              currency_mode: "inherit"
+            - destination_role: "processor_services_product"
+              outgoing_intent_id: "Transact-Purchase-Clearing-Processor"
+              value_date_policy: "same_day"
+              value_date_offset_days: 0
+              amount_basis: "transaction_intent_amount"
+              currency_mode: "inherit"
+      ledger_construction:
+        - ledger_ref: "customer_funds"
+          path_pattern: "[Funds][{product_role}][Customer]"
+        - ledger_ref: "settlement_funds"
+          path_pattern: "[Funds][{product_role}][Settlement]"
+      posting_rules:
+        - trigger_id: "Transact-Purchase-Clearing"
+          source_ledger_ref: "customer_funds"
+          destination_ledger_ref: "settlement_funds"
+          amount_basis: "transaction_intent_amount"
+          value_date_policy: "same_day"
+      value_container_construction:
+        - container_ref: "customer_funds_container"
+          path_pattern: "[Container][{product_role}][Customer]"
+        - container_ref: "settlement_funds_container"
+          path_pattern: "[Container][{product_role}][Settlement]"
+      asset_transfer_rules:
+        - trigger_id: "Transact-Purchase-Clearing"
+          source_container_ref: "customer_funds_container"
+          destination_container_ref: "settlement_funds_container"
+          amount_basis: "transaction_intent_amount"
+          value_date_policy: "same_day"
+      fee_sequences: []
+      ledger_value_container_map:
+        - ledger_ref: "settlement_funds"
+          container_ref: "settlement_funds_container"
+          mapping_mode: "aggregate"
+    - pipeline_profile_id: "scheme_access_pipeline"
+      transaction_intents: []
+      ledger_construction:
+        - ledger_ref: "scheme_fee_receivable"
+          path_pattern: "[Receivables][{self_product}][From-{payer_role}]"
+      posting_rules:
+        - trigger_id: "fee_scheme_access"
+          source_ledger_ref: "scheme_fee_receivable"
+          destination_ledger_ref: "scheme_fee_receivable"
+          amount_basis: "fee_amount"
+          value_date_policy: "next_month_day_plus_x"
+          value_date_offset_days: 5
+      value_container_construction: []
+      asset_transfer_rules: []
+      fee_sequences:
+        - sequence_id: "scheme_fee_sequence"
+          fees:
+            - fee_id: "fee_scheme_access"
+              trigger_ids: ["Transact-Purchase-Clearing-Scheme"]
+              beneficiary_role: "self_agent"
+              beneficiary_product_role: "self_product"
+              settlement_value_date_policy: "next_month_day_plus_x"
+              settlement_value_date_offset_days: 5
+              settlement_trigger_event: "invoice_transaction_event"
+              count_cost:
+                amount: 0.01
+                currency: "USD"
+              amount_percentage: 0.0015
+      ledger_value_container_map: []
+    - pipeline_profile_id: "processor_services_pipeline"
+      transaction_intents: []
+      ledger_construction:
+        - ledger_ref: "processor_fee_receivable"
+          path_pattern: "[Receivables][{self_product}][From-{payer_role}]"
+      posting_rules:
+        - trigger_id: "fee_processor_services"
+          source_ledger_ref: "processor_fee_receivable"
+          destination_ledger_ref: "processor_fee_receivable"
+          amount_basis: "fee_amount"
+          value_date_policy: "next_month_day_plus_x"
+          value_date_offset_days: 5
+      value_container_construction: []
+      asset_transfer_rules: []
+      fee_sequences:
+        - sequence_id: "processor_fee_sequence"
+          fees:
+            - fee_id: "fee_processor_services"
+              trigger_ids: ["Transact-Purchase-Clearing-Processor"]
+              beneficiary_role: "self_agent"
+              beneficiary_product_role: "self_product"
+              settlement_value_date_policy: "next_month_day_plus_x"
+              settlement_value_date_offset_days: 5
+              settlement_trigger_event: "invoice_transaction_event"
+              count_cost:
+                amount: 0.03
+                currency: "USD"
+      ledger_value_container_map: []
+
+world:
+  vendor_agents:
+    - vendor_id: "vendor_alpha"
+      vendor_label: "Vendor Alpha"
+      operational: true
+      products:
+        - product_id: "prod_prepaid_alpha"
+          product_label: "Alpha Prepaid Card"
+          product_class: "RetailPayment-Card-Prepaid"
+          onboarding_friction:
+            min: 0.0
+            max: 0.0
+          transaction_friction:
+            min: 0.0
+            max: 0.0
+          pipeline_profile_id: "prepaid_card_pipeline"
+          pipeline_role_bindings:
+            entity_roles:
+              product_role: { product_id: "prod_prepaid_alpha" }
+              scheme_access_product: { product_id: "prod_scheme_access" }
+              processor_services_product: { product_id: "prod_processor_services" }
+            default_product_role: "product_role"
+    - vendor_id: "vendor_scheme"
+      vendor_label: "Global Payment Scheme (Sink)"
+      operational: true
+      products:
+        - product_id: "prod_scheme_access"
+          product_label: "Scheme-Access Product"
+          product_class: "SinkProduct"
+          pipeline_profile_id: "scheme_access_pipeline"
+          pipeline_role_bindings:
+            entity_roles:
+              self_agent: { agent_id: "vendor_scheme" }
+              self_product: { product_id: "prod_scheme_access" }
+              payer_role: { agent_id: "vendor_alpha" }
+            default_product_role: "self_product"
+    - vendor_id: "vendor_processor"
+      vendor_label: "Payment Processor (Sink)"
+      operational: true
+      products:
+        - product_id: "prod_processor_services"
+          product_label: "Processor-Services Product"
+          product_class: "SinkProduct"
+          pipeline_profile_id: "processor_services_pipeline"
+          pipeline_role_bindings:
+            entity_roles:
+              self_agent: { agent_id: "vendor_processor" }
+              self_product: { product_id: "prod_processor_services" }
+              payer_role: { agent_id: "vendor_alpha" }
+            default_product_role: "self_product"
+  pops:
+    - pop_id: "pop_main"
+      pop_label: "Main Pop Segment"
+      pop_count: 10000
+      daily_onboard: 0.05
+      daily_active: 0.40
+      daily_transact_count: 1.2
+      daily_transact_amount:
+        amount: 22.5
+        currency: "USD"
+      product_links:
+        - vendor_id: "vendor_alpha"
+          product_id: "prod_prepaid_alpha"
+          known: true
+          onboarded_count: 0
+
+control_defaults:
+  accepting_onboard: true
+  accepting_transact: true

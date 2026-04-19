@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -250,6 +251,176 @@ def _validate_v2_foundations(cfg: PrototypeConfig, collected: list[ConfigWarning
                     f"money.default_currency '{default_currency}'",
                     "world.pops[].daily_transact_amount.currency",
                 )
+
+    # 6. Pipeline contract validation (spec 40 §pipeline, ADR-0002).
+    _validate_pipeline_contracts(cfg)
+
+
+_ROLE_PLACEHOLDER_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+
+
+def _validate_pipeline_contracts(cfg: PrototypeConfig) -> None:
+    """Cross-entity validation for the pipeline section + per-product bindings."""
+    pipeline = cfg.pipeline
+    profile_ids: set[str] = set()
+    profiles_by_id: dict[str, "PipelineProfileConfig"] = {}
+
+    if pipeline is not None:
+        # First pass: id uniqueness + index.
+        for prof in pipeline.pipeline_profiles:
+            if prof.pipeline_profile_id in profile_ids:
+                raise ConfigValidationError(
+                    "E_PIPELINE_PROFILE_DUPLICATE",
+                    f"Duplicate pipeline_profile_id '{prof.pipeline_profile_id}'",
+                    "pipeline.pipeline_profiles[].pipeline_profile_id",
+                )
+            profile_ids.add(prof.pipeline_profile_id)
+            profiles_by_id[prof.pipeline_profile_id] = prof
+
+        # Cross-profile pool of all outgoing intent ids: a sink profile's fee can
+        # trigger on an upstream profile's outgoing_intent_id (the routed intent).
+        all_outgoing_ids: set[str] = {
+            d.outgoing_intent_id
+            for prof in pipeline.pipeline_profiles
+            for i in prof.transaction_intents
+            for d in i.destinations
+        }
+        all_intent_ids: set[str] = {
+            i.intent_id
+            for prof in pipeline.pipeline_profiles
+            for i in prof.transaction_intents
+        }
+
+        for prof in pipeline.pipeline_profiles:
+
+            # Validate intra-profile refs.
+            ledger_refs = {l.ledger_ref for l in prof.ledger_construction}
+            container_refs = {c.container_ref for c in prof.value_container_construction}
+            intent_ids = {i.intent_id for i in prof.transaction_intents}
+            outgoing_ids = {
+                d.outgoing_intent_id
+                for i in prof.transaction_intents
+                for d in i.destinations
+            }
+
+            for r in prof.posting_rules:
+                if r.source_ledger_ref not in ledger_refs:
+                    raise ConfigValidationError(
+                        "E_LEDGER_REF_NOT_FOUND",
+                        f"Profile '{prof.pipeline_profile_id}': posting_rules.source_ledger_ref "
+                        f"'{r.source_ledger_ref}' not defined",
+                        "pipeline.pipeline_profiles[].posting_rules[].source_ledger_ref",
+                    )
+                if r.destination_ledger_ref not in ledger_refs:
+                    raise ConfigValidationError(
+                        "E_LEDGER_REF_NOT_FOUND",
+                        f"Profile '{prof.pipeline_profile_id}': posting_rules.destination_ledger_ref "
+                        f"'{r.destination_ledger_ref}' not defined",
+                        "pipeline.pipeline_profiles[].posting_rules[].destination_ledger_ref",
+                    )
+
+            for r in prof.asset_transfer_rules:
+                if r.source_container_ref not in container_refs:
+                    raise ConfigValidationError(
+                        "E_CONTAINER_REF_NOT_FOUND",
+                        f"Profile '{prof.pipeline_profile_id}': asset_transfer_rules.source_container_ref "
+                        f"'{r.source_container_ref}' not defined",
+                        "pipeline.pipeline_profiles[].asset_transfer_rules[].source_container_ref",
+                    )
+                if r.destination_container_ref not in container_refs:
+                    raise ConfigValidationError(
+                        "E_CONTAINER_REF_NOT_FOUND",
+                        f"Profile '{prof.pipeline_profile_id}': asset_transfer_rules.destination_container_ref "
+                        f"'{r.destination_container_ref}' not defined",
+                        "pipeline.pipeline_profiles[].asset_transfer_rules[].destination_container_ref",
+                    )
+
+            for m in prof.ledger_value_container_map:
+                if m.ledger_ref not in ledger_refs:
+                    raise ConfigValidationError(
+                        "E_LEDGER_REF_NOT_FOUND",
+                        f"Profile '{prof.pipeline_profile_id}': ledger_value_container_map.ledger_ref "
+                        f"'{m.ledger_ref}' not defined",
+                        "pipeline.pipeline_profiles[].ledger_value_container_map[].ledger_ref",
+                    )
+                if m.container_ref not in container_refs:
+                    raise ConfigValidationError(
+                        "E_CONTAINER_REF_NOT_FOUND",
+                        f"Profile '{prof.pipeline_profile_id}': ledger_value_container_map.container_ref "
+                        f"'{m.container_ref}' not defined",
+                        "pipeline.pipeline_profiles[].ledger_value_container_map[].container_ref",
+                    )
+
+            # Fee triggers must reference a defined intent (this profile's intent_ids,
+            # any profile's outgoing_intent_id — sink profiles trigger on routed
+            # upstream intents) OR a fee_id earlier in the same sequence.
+            for seq in prof.fee_sequences:
+                seen_in_seq: set[str] = set()
+                for fee in seq.fees:
+                    valid_triggers = (
+                        all_intent_ids
+                        | all_outgoing_ids
+                        | seen_in_seq
+                    )
+                    for tid in fee.trigger_ids:
+                        if tid not in valid_triggers:
+                            raise ConfigValidationError(
+                                "E_FEE_TRIGGER_UNKNOWN",
+                                f"Profile '{prof.pipeline_profile_id}' fee '{fee.fee_id}' "
+                                f"references unknown trigger '{tid}'",
+                                "pipeline.pipeline_profiles[].fee_sequences[].fees[].trigger_ids",
+                            )
+                    seen_in_seq.add(fee.fee_id)
+
+    # Per-product binding validation: pipeline_profile_id must reference a defined profile,
+    # and every {role_placeholder} in path patterns / destinations must be resolvable from
+    # the product's pipeline_role_bindings.
+    for vendor in cfg.world.vendor_agents:
+        for product in vendor.products:
+            if product.pipeline_profile_id is None:
+                # Profile binding is optional; products without it just don't run a pipeline.
+                continue
+            if pipeline is None or product.pipeline_profile_id not in profile_ids:
+                raise ConfigValidationError(
+                    "E_PIPELINE_PROFILE_NOT_FOUND",
+                    f"Vendor '{vendor.vendor_id}' product '{product.product_id}' "
+                    f"references unknown pipeline_profile_id "
+                    f"'{product.pipeline_profile_id}'",
+                    "world.vendor_agents[].products[].pipeline_profile_id",
+                )
+            bindings = product.pipeline_role_bindings
+            known_roles: set[str] = set()
+            if bindings is not None:
+                known_roles |= set(bindings.entity_roles.keys())
+            profile = profiles_by_id[product.pipeline_profile_id]
+            # Collect placeholders from path patterns + destinations.
+            placeholders_seen: set[str] = set()
+            for l in profile.ledger_construction:
+                placeholders_seen |= set(_ROLE_PLACEHOLDER_RE.findall(l.path_pattern))
+            for c in profile.value_container_construction:
+                placeholders_seen |= set(_ROLE_PLACEHOLDER_RE.findall(c.path_pattern))
+            for i in profile.transaction_intents:
+                for d in i.destinations:
+                    placeholders_seen.add(d.destination_role)
+            for seq in profile.fee_sequences:
+                for fee in seq.fees:
+                    placeholders_seen.add(fee.beneficiary_role)
+                    if fee.beneficiary_product_role:
+                        placeholders_seen.add(fee.beneficiary_product_role)
+            unresolved = placeholders_seen - known_roles
+            if unresolved:
+                raise ConfigValidationError(
+                    "E_PIPELINE_ROLE_UNRESOLVED",
+                    f"Vendor '{vendor.vendor_id}' product '{product.product_id}' "
+                    f"profile '{product.pipeline_profile_id}': roles referenced but "
+                    f"not bound: {sorted(unresolved)}",
+                    "world.vendor_agents[].products[].pipeline_role_bindings.entity_roles",
+                )
+
+            # If pipeline binding present but pipeline section is v2_foundations,
+            # enforce config consistency: v2 profiles attached to products are
+            # parsed/validated but not executed at runtime (ADR-0002 gating). No error,
+            # just informational warning would go here — left as silent skip per spec.
 
 
 def _extract_code(msg: str) -> str:

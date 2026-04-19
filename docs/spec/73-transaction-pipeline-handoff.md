@@ -37,8 +37,9 @@ Legend: `A` = Accountable, `R` = Responsible, `C` = Consulted.
   - Spec-only contract expansion.
   - Claude may prepare implementation plans, but must not treat v2 features as runtime-mandatory until promoted.
 - `v3_runtime`
-  - First runtime-binding target for full pipeline expansion.
+  - Runtime-binding profile for full pipeline expansion.
   - Execution order must be deterministic and aligned to chapter `33`.
+  - Promotion is approved by ADR-0002 for configs that declare `pipeline_schema_version: v3_runtime`.
 
 ---
 

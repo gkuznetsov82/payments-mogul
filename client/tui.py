@@ -25,7 +25,10 @@ import httpx
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
 from textual.reactive import reactive
-from textual.widgets import Button, DataTable, Footer, Header, Label, Log, RichLog, Static
+from textual.widgets import (
+    Button, DataTable, Footer, Header, Label, Log, RichLog, Static,
+    TabbedContent, TabPane,
+)
 
 
 BASE_URL = "http://localhost:8000"
@@ -112,28 +115,42 @@ class MogulApp(App):
     #main {
         height: 1fr;
     }
-    #controls {
-        width: 30;
+    #run-strip {
+        height: 5;
         border: solid $accent;
-        padding: 1;
-        overflow-y: auto;
+        padding: 0 1;
+        align-vertical: middle;
     }
-    #state-panel {
+    #run-strip Button {
+        width: 18;
+        height: 3;
+        min-width: 14;
+        margin: 0 1 0 0;
+    }
+    #ack-label {
         width: 1fr;
-        border: solid $accent;
-        padding: 1;
+        margin: 1 0 0 1;
+        color: $text-muted;
     }
-    #event-log {
-        min-height: 8;
+    #tabs {
         height: 1fr;
-        border: solid $surface;
     }
-    Button {
+    .tab-pane-content {
+        height: 1fr;
+        padding: 1;
+        overflow: auto;
+    }
+    .controls-pane Button {
         width: 100%;
         margin: 0 0 1 0;
     }
     Label {
         margin: 1 0 0 0;
+    }
+    #event-log, #pipeline-log, #ledger-log {
+        min-height: 8;
+        height: 1fr;
+        border: solid $surface;
     }
     """
 
@@ -146,6 +163,12 @@ class MogulApp(App):
         ("ctrl+p", "pause", "Pause"),
         ("ctrl+n", "next_day", "Next Day"),
         ("ctrl+d", "shutdown_server", "Shutdown server"),
+        # Spec 12 §TUI IA + spec 60: keyboard-switchable observability sections.
+        ("f1", "view_world", "World"),
+        ("f2", "view_pipeline", "Pipeline"),
+        ("f3", "view_ledger", "Ledger"),
+        ("f4", "view_controls", "Controls"),
+        ("f5", "view_logs", "Logs"),
     ]
 
     def __init__(self, base_url: str) -> None:
@@ -179,27 +202,41 @@ class MogulApp(App):
         yield Header(show_clock=True)
         yield StatusBar(id="status")
         yield Banner(id="banner")
-        with Horizontal(id="main"):
-            with Vertical(id="controls"):
-                yield Label("── Simulation ──")
-                yield Button("▶  Resume", id="btn-resume", variant="success")
-                yield Button("⏸  Pause", id="btn-pause", variant="warning")
-                yield Button("⏭  Next Day", id="btn-next-day", variant="primary")
-                yield Label("── Onboarding ──")
-                yield Button("Open Onboarding", id="btn-open-ob")
-                yield Button("Close Onboarding", id="btn-close-ob", variant="error")
-                yield Label("── Transacting ──")
-                yield Button("Open Transacting", id="btn-open-tx")
-                yield Button("Close Transacting", id="btn-close-tx", variant="error")
-                yield Label("── World ──")
-                yield Button("⟳  Reload Config", id="btn-reload", variant="primary")
-                yield Button("⛔  Shutdown Server", id="btn-shutdown", variant="error")
-                yield Label("", id="ack-label")
-            with Vertical(id="state-panel"):
-                yield Static("[bold]Vendor / Product State[/]", id="vendor-info")
-                yield Static("[bold]Pop State[/]", id="pop-info")
-                yield Label("── Recent Events ──")
-                yield RichLog(id="event-log", highlight=True, markup=True)
+        # Spec 12 + ADR-0002 clarification 6: timing controls always visible.
+        with Horizontal(id="run-strip"):
+            yield Button("▶  Resume", id="btn-resume", variant="success")
+            yield Button("⏸  Pause", id="btn-pause", variant="warning")
+            yield Button("⏭  Next Day", id="btn-next-day", variant="primary")
+            yield Static("", id="ack-label")
+        # Spec 60 §TUI observability views: World/Pipeline/Ledger/Controls/Logs as tabs.
+        with TabbedContent(id="tabs", initial="tab-world"):
+            with TabPane("World [F1]", id="tab-world"):
+                with Vertical(classes="tab-pane-content"):
+                    yield Static("[bold]Vendor / Product State[/]", id="vendor-info")
+                    yield Static("[bold]Pop State[/]", id="pop-info")
+            with TabPane("Pipeline [F2]", id="tab-pipeline"):
+                with Vertical(classes="tab-pane-content"):
+                    yield Label("Intents · Fees · Transfers · Invoices")
+                    yield RichLog(id="pipeline-log", highlight=True, markup=True)
+            with TabPane("Ledger [F3]", id="tab-ledger"):
+                with Vertical(classes="tab-pane-content"):
+                    yield Label("Postings · Settlements · Reconciliation")
+                    yield RichLog(id="ledger-log", highlight=True, markup=True)
+            with TabPane("Controls [F4]", id="tab-controls"):
+                with Vertical(classes="tab-pane-content controls-pane"):
+                    yield Label("── Onboarding ──")
+                    yield Button("Open Onboarding", id="btn-open-ob")
+                    yield Button("Close Onboarding", id="btn-close-ob", variant="error")
+                    yield Label("── Transacting ──")
+                    yield Button("Open Transacting", id="btn-open-tx")
+                    yield Button("Close Transacting", id="btn-close-tx", variant="error")
+                    yield Label("── World ──")
+                    yield Button("⟳  Reload Config", id="btn-reload", variant="primary")
+                    yield Button("⛔  Shutdown Server", id="btn-shutdown", variant="error")
+            with TabPane("Logs [F5]", id="tab-logs"):
+                with Vertical(classes="tab-pane-content"):
+                    yield Label("── Recent Events ──")
+                    yield RichLog(id="event-log", highlight=True, markup=True)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -342,6 +379,18 @@ class MogulApp(App):
     def _log_line(self, markup: str) -> None:
         try:
             self.query_one("#event-log", RichLog).write(f"[dim]{self._ts()}[/] {markup}")
+        except Exception:
+            pass
+
+    def _log_pipeline(self, markup: str) -> None:
+        try:
+            self.query_one("#pipeline-log", RichLog).write(f"[dim]{self._ts()}[/] {markup}")
+        except Exception:
+            pass
+
+    def _log_ledger(self, markup: str) -> None:
+        try:
+            self.query_one("#ledger-log", RichLog).write(f"[dim]{self._ts()}[/] {markup}")
         except Exception:
             pass
 
@@ -493,6 +542,57 @@ class MogulApp(App):
             n = data.get("command_count", 0)
             if n:
                 self._log_line(f"[magenta]inputs_processed[/] T{data.get('tick_id')} commands={n}")
+        # ---- Pipeline tab events (spec 52 §Pipeline observability) ----
+        elif event_type == "transaction_intent_event":
+            self._log_pipeline(
+                f"[cyan]intent[/] T{data.get('tick_id')} prof={data.get('pipeline_profile_id')} "
+                f"id={data.get('intent_id')} parent={data.get('parent_intent_id')} "
+                f"src={data.get('product_id')} -> {data.get('destination_role')} "
+                f"({data.get('destination_product_id')}) "
+                f"n={data.get('txn_count')} amt={self._fmt_amount(data.get('amount'))} "
+                f"vd={data.get('value_date_policy')}={data.get('resolved_value_date')}"
+            )
+        elif event_type == "fee_accrual_event":
+            self._log_pipeline(
+                f"[yellow]fee[/] T{data.get('tick_id')} prof={data.get('pipeline_profile_id')} "
+                f"id={data.get('fee_id')} trig={data.get('trigger_id')} "
+                f"prod={data.get('product_id')} bene={data.get('beneficiary_role')}/"
+                f"{data.get('beneficiary_product_id')} "
+                f"fixed={self._fmt_amount(data.get('fixed_component'))} "
+                f"pct={self._fmt_amount(data.get('percent_component'))} "
+                f"total={self._fmt_amount(data.get('fee_amount'))} "
+                f"due={data.get('settlement_due_date')} status={data.get('status')}"
+            )
+        elif event_type == "value_transfer_event":
+            self._log_pipeline(
+                f"[green]xfer[/] T{data.get('tick_id')} prof={data.get('pipeline_profile_id')} "
+                f"id={data.get('transfer_id')} trig={data.get('trigger_id')} "
+                f"{data.get('source_container_path')} -> {data.get('destination_container_path')} "
+                f"amt={self._fmt_amount(data.get('amount'))} status={data.get('status')}"
+            )
+        elif event_type == "invoice_transaction_event":
+            self._log_pipeline(
+                f"[bold yellow]invoice[/] T{data.get('tick_id')} due={data.get('simulation_date')} "
+                f"id={data.get('invoice_id')} fee={data.get('fee_id')} "
+                f"amt={self._fmt_amount(data.get('amount'))} status={data.get('status')}"
+            )
+        # ---- Ledger tab events ----
+        elif event_type == "posting_entry_event":
+            self._log_ledger(
+                f"[cyan]post[/] T{data.get('tick_id')} prof={data.get('pipeline_profile_id')} "
+                f"id={data.get('posting_id')} trig={data.get('trigger_id')} "
+                f"{data.get('source_ledger_path')} -> {data.get('destination_ledger_path')} "
+                f"amt={self._fmt_amount(data.get('amount'))} "
+                f"vd={data.get('value_date_policy')}={data.get('resolved_value_date')}"
+            )
+        elif event_type == "settlement_resolution_event":
+            self._log_ledger(
+                f"[bold green]settle[/] T{data.get('tick_id')} inv={data.get('invoice_id')} "
+                f"fee={data.get('fee_id')} mode={data.get('mode')} "
+                f"settled={self._fmt_amount(data.get('settled_amount'))} "
+                f"residual={self._fmt_amount(data.get('residual_amount'))} "
+                f"final={data.get('final_status')}"
+            )
         elif event_type == "world_restarting":
             gen = data.get("world_generation")
             reason = data.get("reason", "unknown")
@@ -681,6 +781,28 @@ class MogulApp(App):
             self._log_control_response("next_day", r)
         except httpx.RequestError as exc:
             self._log_line(f"[red]HTTP error: {exc}[/]")
+
+    def _switch_tab(self, tab_id: str) -> None:
+        try:
+            tabs = self.query_one("#tabs", TabbedContent)
+            tabs.active = tab_id
+        except Exception:
+            pass
+
+    def action_view_world(self) -> None:
+        self._switch_tab("tab-world")
+
+    def action_view_pipeline(self) -> None:
+        self._switch_tab("tab-pipeline")
+
+    def action_view_ledger(self) -> None:
+        self._switch_tab("tab-ledger")
+
+    def action_view_controls(self) -> None:
+        self._switch_tab("tab-controls")
+
+    def action_view_logs(self) -> None:
+        self._switch_tab("tab-logs")
 
     async def action_shutdown_server(self) -> None:
         try:

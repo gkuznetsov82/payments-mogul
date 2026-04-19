@@ -89,6 +89,18 @@ regions:
     calendar_id: "cal_gcc_fri_sat"
     label: "GCC Region"
 
+pipeline:
+  pipeline_schema_version: "v3_runtime"
+  pipeline_profiles:
+    - pipeline_profile_id: "prepaid_minimal"
+      transaction_intents: []
+      ledger_construction: []
+      posting_rules: []
+      value_container_construction: []
+      asset_transfer_rules: []
+      fee_sequences: []
+      ledger_value_container_map: []
+
 world:
   vendor_agents:
     - vendor_id: "vendor_alpha"
@@ -99,6 +111,12 @@ world:
         - product_id: "prod_prepaid_alpha"
           product_label: "Alpha Prepaid Card"
           product_class: "RetailPayment-Card-Prepaid"
+          pipeline_profile_id: "prepaid_minimal"
+          pipeline_role_bindings:
+            entity_roles:
+              product_role: { product_id: "prod_prepaid_alpha" }
+              local: { local: true }
+            default_product_role: "product_role"
           onboarding_friction:
             min: 0.05
             max: 0.10

@@ -19,10 +19,13 @@ from enum import Enum
 from pathlib import Path
 
 from engine.agents.pop import ActionOutcome
+from engine.calendars.registry import CalendarRegistry, RegionRegistry
 from engine.config.loader import ConfigValidationError, load_config
 from engine.config.models import PrototypeConfig
 from engine.money import CurrencyCatalog
 from engine.numeric import round_amount, round_count
+from engine.pipeline.executor import PipelineExecutor, cfg_pipeline_runtime
+from engine.pipeline.store import PipelineStore
 from engine.scenario import ScenarioDates
 from engine.simulation.model import PaymentsMogulModel
 
@@ -86,6 +89,46 @@ class SimulationEngine:
             cfg.money is not None and cfg.money.enforce_money_object
         )
         self.default_currency: str | None = cfg.money.default_currency if cfg.money else None
+        # v3_runtime pipeline executor (ADR-0002 gating). Calendar lookup wires
+        # vendor.region_id -> calendar via the calendar/region registries.
+        self._calendar_registry: CalendarRegistry | None = None
+        self._region_registry: RegionRegistry | None = None
+        if cfg.calendars:
+            self._calendar_registry = CalendarRegistry.from_config(cfg)
+            self._region_registry = RegionRegistry.from_config(cfg, self._calendar_registry)
+        self._pending_pipeline_events: list[dict] = []
+        self._pipeline_executor: PipelineExecutor | None = None
+        self._pipeline_store: PipelineStore | None = None
+        if cfg_pipeline_runtime(cfg):
+            self._pipeline_store = PipelineStore(":memory:")
+            self._pipeline_executor = PipelineExecutor(
+                cfg=cfg,
+                model=self.model,
+                default_currency=self.default_currency or "USD",
+                calendar_lookup=self._calendar_for_vendor,
+                emit=self._buffer_pipeline_event,
+            )
+
+    def _calendar_for_vendor(self, vendor_id: str):
+        """Resolve a vendor's calendar via region binding (spec 40)."""
+        if self._region_registry is None:
+            return None
+        vendor = self.model.vendors.get(vendor_id)
+        if vendor is None:
+            return None
+        # Vendor stored config carries region_id; agents copy it from cfg.
+        region_id = getattr(vendor, "region_id", None)
+        try:
+            return self._region_registry.calendar_for_entity(region_id)
+        except Exception:
+            return None
+
+    def _buffer_pipeline_event(self, event_type: str, data: dict) -> None:
+        """Pipeline executor pushes here; engine drains to SSE after tick commit
+        and persists to the SQLite observability store (ADR-0002)."""
+        self._pending_pipeline_events.append({"event": event_type, "data": data})
+        if self._pipeline_store is not None:
+            self._pipeline_store.record(event_type, data)
 
     @staticmethod
     def _load_currency_catalog(cfg: PrototypeConfig,
@@ -342,6 +385,24 @@ class SimulationEngine:
             cfg.money is not None and cfg.money.enforce_money_object
         )
         self.default_currency = cfg.money.default_currency if cfg.money else None
+        self._calendar_registry = None
+        self._region_registry = None
+        if cfg.calendars:
+            self._calendar_registry = CalendarRegistry.from_config(cfg)
+            self._region_registry = RegionRegistry.from_config(cfg, self._calendar_registry)
+        self._pipeline_executor = None
+        if self._pipeline_store is not None:
+            self._pipeline_store.close()
+            self._pipeline_store = None
+        if cfg_pipeline_runtime(cfg):
+            self._pipeline_store = PipelineStore(":memory:")
+            self._pipeline_executor = PipelineExecutor(
+                cfg=cfg,
+                model=self.model,
+                default_currency=self.default_currency or "USD",
+                calendar_lookup=self._calendar_for_vendor,
+                emit=self._buffer_pipeline_event,
+            )
 
         await self._emit("world_restarted", {
             "world_generation": self._world_generation,
@@ -510,6 +571,21 @@ class SimulationEngine:
             d["simulation_date"] = sim_date_iso
             self._recent_outcomes.append(d)
             await self._emit("action_outcome", d)
+
+        # ADR-0002 gating: run promoted pipeline stages after v1 adjudication.
+        # Stage order (spec 30 §v3_runtime): intents -> fees -> postings ->
+        # asset transfers -> invoice/settlement. tick_id and simulation_date
+        # already reflect the day just simulated by Mesa's model.step().
+        if self._pipeline_executor is not None:
+            self._pending_pipeline_events.clear()
+            self._pipeline_executor.run_post_adjudication(
+                outcomes=outcomes,
+                tick_id=self.tick_id,
+                simulation_date=self.simulation_date,
+            )
+            for evt in self._pending_pipeline_events:
+                await self._emit(evt["event"], evt["data"])
+            self._pending_pipeline_events.clear()
 
         if len(self._recent_outcomes) > self._max_recent:
             self._recent_outcomes = self._recent_outcomes[-self._max_recent:]

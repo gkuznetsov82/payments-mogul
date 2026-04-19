@@ -8,6 +8,7 @@ from engine.agents.product import (
     GenericProduct,
     OnboardDecisionResult,
     TransactDecisionResult,
+    TransactionDetails,
     build_product,
 )
 from engine.config.models import ControlDefaultsConfig, VendorAgentConfig
@@ -24,6 +25,7 @@ class VendorAgent(mesa.Agent):
         self.vendor_id = cfg.vendor_id
         self.vendor_label = cfg.vendor_label
         self.operational = cfg.operational
+        self.region_id = cfg.region_id  # v2 foundations: drives calendar lookup
         self.products: dict[str, GenericProduct] = {
             p.product_id: build_product(
                 p,
@@ -76,6 +78,28 @@ class VendorAgent(mesa.Agent):
             pop_id, requested_pop_count, requested_txn_count, requested_total_amount,
             self.model.random,
         )
+
+    def handle_transact_from_vendor(
+        self,
+        client_id: str,
+        product_id: str,
+        details: TransactionDetails,
+    ) -> TransactDecisionResult:
+        """Per ADR-0002: route an upstream-vendor-originated transaction intent
+        to the owned destination product. `client_id` is the originating
+        upstream vendor_id."""
+        if not self.operational:
+            return TransactDecisionResult(
+                0.0, float(details.txn_count), 0.0, float(details.amount),
+                "VENDOR_NOT_OPERATIONAL",
+            )
+        product = self.products.get(product_id)
+        if product is None:
+            return TransactDecisionResult(
+                0.0, float(details.txn_count), 0.0, float(details.amount),
+                "PRODUCT_NOT_FOUND",
+            )
+        return product.transact_product_from_upstream(client_id, details)
 
     def snapshot(self,
                  count_mode: str = "half_up",
