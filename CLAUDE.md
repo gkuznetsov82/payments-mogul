@@ -62,6 +62,12 @@ Domain specs (`20-`–`23-`) for payment rails, fees, regulation, and KPIs as ne
 
 `docs/spec/SESSION-NOTED.md` is a conversational handoff file. Do not use it to infer requirements, resolve conflicts, or determine implementation behaviour.
 
+### Unstructured notes are NOT specs
+
+`docs/spec/unstructured-notes/` contains ideation and scratch notes only.
+Do not treat files in this directory as implementation-driving requirements, conflict-resolution authority, or runtime behavior contracts.
+Promote any accepted decisions from unstructured notes into numbered specs before implementation.
+
 ---
 
 ## Mandatory tech stack

@@ -21,7 +21,9 @@ Per-screen UI blueprint: components, data bindings, states.
   - `intake_window_closed`
   - `user_inputs_processed`
   - `tick_committed`
-- **Text command input panel** — submit control commands such as `CloseOnboarding(vendor_id, product_id)` / `OpenOnboarding(vendor_id, product_id)` and run-level controls such as `ReloadConfigAndRestartWorld` and `ShutdownServer`.
+- **Text command input panel** — split controls into:
+  - world controls: `ReloadConfigAndRestartWorld`, `ShutdownServer`,
+  - agent controls: onboarding/transacting commands with explicit agent/product target selection.
 - **Text command log** — append `command_ack` events with accepted/rejected and target tick fields.
 - **Text outcome log** — append `action_outcome` lines for onboarding/transact request/decision results.
 - **Text snapshot block** — latest post-commit values for key pop/vendor/product counters and gates.
@@ -59,31 +61,42 @@ Text-first presentation remains valid, but operator workflow must include focusa
 - Purpose: verify transactional flow and fee lifecycle in execution order.
 - Required stream/log groups:
   - transaction intents (incoming/outgoing, source product, destination role/product),
+  - original incoming intents and routed derivatives shown together with shared correlation key,
   - fee accrual records (fee id, beneficiary role/product, amount components),
-  - value transfer records (source/destination container refs, amount, value date),
-  - invoice transaction events for deferred settlement (`next_month_day_plus_x` flows).
+  - value transfer records (source/destination container refs, amount, value date).
 - Required columns/fields:
   - `tick_id`, `simulation_date`, `product_id`, `pipeline_profile_id`,
-  - `trigger_id` / `intent_id` / `fee_id`,
+  - `trigger_id` / `intent_id` / `root_intent_id` / `fee_id`,
   - `value_date_policy` + offset and resolved due date,
-  - status (`accrued`, `invoiced`, `paid`, `failed`).
+  - status (`accrued`, `executed`, `failed`).
 - Required interactions:
   - filter by product, counterparty role, fee id, date range,
-  - phase-order sort (intent -> fee -> posting -> transfer -> invoice/settlement),
+  - phase-order sort (intent -> fee -> posting -> transfer),
   - drill from one row into linked downstream records.
 
-### View C — Ledger and value-container reconciliation
+### View C — Books (ledger hierarchy)
 
-- Purpose: confirm postings and actual value movement remain consistent.
+- Purpose: accounting-first view of hierarchical ledger balances and movements.
 - Required blocks:
+  - hierarchical books tree (group -> product -> sub-account),
   - ledger movement table (debit/credit entries by ledger ref/path),
-  - value-container movement table (transfers by container ref/path),
-  - reconciliation table (`ledger_ref` -> `container_ref`, expected vs actual deltas),
-  - open settlement obligations (including invoice-backed fee payables/receivables).
+  - aggregate roll-ups converted to default currency for display.
 - Required interactions:
   - compare-by-tick and compare-by-date modes,
-  - highlight mismatches (`unmapped`, `unbalanced`, `pending_due`, `past_due`),
-  - jump from mismatch line to contributing postings/transfers/events.
+  - expand/collapse by hierarchy level,
+  - jump from aggregate line to contributing posting rows.
+
+### View D — Accounts (value containers)
+
+- Purpose: operational-funds view of container balances and value movement.
+- Required blocks:
+  - value-container hierarchy by owner/product/counterparty where applicable,
+  - value-container movement table (transfers by container ref/path),
+  - aggregate roll-ups converted to default currency for display.
+- Required interactions:
+  - compare-by-tick and compare-by-date modes,
+  - highlight mismatches (`unmapped`, `unbalanced`),
+  - jump from account line to contributing transfer rows.
 
 ### Minimum navigation contract
 
@@ -92,9 +105,10 @@ Text-first presentation remains valid, but operator workflow must include focusa
   - `Run` (timing controls always visible in this section/header region)
   - `World`
   - `Pipeline`
-  - `Ledger`
+  - `Books`
+  - `Accounts`
   - `Logs` (command/outcome/event stream; not required to be always visible).
-- If viewport is constrained, section switching may become paged, but all three sections remain reachable.
+- If viewport is constrained, section switching may become paged, but all required sections remain reachable.
 
 This prototype UI remains text-first and does not require graphical chart rendering for this phase gate.
 

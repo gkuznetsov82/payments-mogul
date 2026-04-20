@@ -20,6 +20,8 @@ The API must support at minimum:
 - **Speed** — Set **1× / 2× / 3×** (or scalar multiplier) relative to configured base interval for **continuous** advance only.
 - **Debug window** — **Deferred for prototype runtime** until transaction pipeline emits compactable debug data; for now, keep `debug_history_*` as validated config/reserved controls only (**`33-transaction-pipeline.md`**, **`40-yaml-config.md`**).
 - **Decisions / controls** — Submit intake-window control commands for entities (scoped by auth/control graph policy—**`31-agents.md`**); processing tick depends on intake-close timing (**`30-architecture.md`**).
+- **World controls** — Run-level controls (`reload_config`, `shutdown`) are world-scoped and not tied to selected agent context.
+- **Agent controls** — Product/agent controls (for example `CloseOnboarding`, `OpenOnboarding`) require explicit agent/product target context.
 - **Config reload + world restart** — Command to re-read server config and restart world state from tick 0 (details below).
 - **Server shutdown** — Command to request graceful server shutdown with pre-close SSE notification (details below).
 
@@ -50,6 +52,9 @@ For `prototype_vendor_pop_v1`, API inputs are treated as **control-state command
   4. Reset run state to startup baseline (at minimum: tick id to initial value, fresh agent state, cleared transient command queues).
 - If validation fails, server returns validation failure details and keeps current world running.
 - Response should include a structured result (`accepted`, `reloaded`, `error_codes`/`rejection_reason`, and world generation identifier if used).
+- Reload acceptance must imply a graceful-restart intent for stream subscribers:
+  - emit `server_shutdown` with `reason=config_reload_restart` and `will_restart=true`,
+  - then emit `world_restarting` / `world_restarted` after new world initialization.
 
 ### Server shutdown command
 
@@ -57,6 +62,7 @@ For `prototype_vendor_pop_v1`, API inputs are treated as **control-state command
 - On acceptance, server must emit `server_shutdown` to subscribers before closing streams/process.
 - Response should include accepted/rejected status and shutdown timing hints (`grace_period_ms`, optional `reconnect_after_ms`).
 - If shutdown command is rejected (for policy/authorization reasons), return explicit `rejection_reason`.
+- Manual/terminal shutdown requests must set `server_shutdown.will_restart=false` unless the shutdown is part of a declared restart flow.
 
 ### Example prototype commands
 
@@ -111,12 +117,14 @@ When returning aggregates/outcomes with amounts, include money objects so TUI ca
 - `target_tick`
 - `processed_in_tick` (when available after processing)
 - `rejection_reason` (when rejected)
+- `command_scope` (`world` or `agent`)
 
 For control-plane actions (`pause`, `resume`, `reload_config`, `shutdown`), provide equivalent explicit status fields so clients can distinguish:
 
 - accepted vs rejected
 - immediate effect vs pending effect
 - resulting run mode (`running`, `pause_pending`, `paused`, `restarting`, `shutting_down`)
+- shutdown/restart intent (`will_restart` when applicable) and reconnect hint (`reconnect_after_ms` when applicable)
 
 ### Authority model (phased)
 

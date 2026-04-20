@@ -64,7 +64,7 @@ Date and currency visibility fields are required for TUI/operator readability:
 - `intake_countdown_resumed` (resume during frozen intake; includes remaining ms at resume)
 - `world_restarting` (reload requested and accepted; old world draining)
 - `world_restarted` (new world initialized; includes new baseline tick/snapshot generation id)
-- `server_shutdown` (server is intentionally going down; includes reason and reconnect hint)
+- `server_shutdown` (server is intentionally going down; includes reason, reconnect hint, and restart intent)
 
 ### Pipeline observability event family (required for TUI operator views)
 
@@ -72,16 +72,18 @@ To support pipeline/ledger observability sections in **`60-screen-specs.md`**, s
 
 - `transaction_intent_event`
   - intent creation/routing details, source product, destination role/product, value date policy + resolved date.
+  - must include `intent_stage` (`original_incoming` or `routed_outgoing`) so operators can see both original and derivative intents in logs.
+  - must include a stable correlation reference (`root_intent_id`) shared by the original intent and all routed derivatives.
 - `fee_accrual_event`
   - fee id, beneficiary role/product, amount components (`count_cost`, `amount_percentage`), accrual status.
 - `value_transfer_event`
   - source/destination container refs, amount, value date policy + resolved date, execution status.
 - `posting_entry_event`
   - source/destination ledger refs, debit/credit amount, posting date/status.
-- `invoice_transaction_event`
-  - emitted at due date for deferred settlement (`next_month_day_plus_x`), including payer/beneficiary context.
-- `settlement_resolution_event`
-  - invoice resolution mode (`paid`), settled amount, residual amount (if any), final status.
+- `invoice_transaction_event` (deferred to v4)
+  - deferred settlement event family remains outside this v3 final-touch scope.
+- `settlement_resolution_event` (deferred to v4)
+  - invoice/settlement resolution lifecycle is deferred to v4.
 
 Event payloads should include consistent correlation keys for cross-view drill-down:
 
@@ -90,6 +92,7 @@ Event payloads should include consistent correlation keys for cross-view drill-d
 - `pipeline_profile_id`
 - `product_id`
 - one or more of `intent_id`, `trigger_id`, `fee_id`, `invoice_id`
+- `root_intent_id` when intent fan-out/routing occurs
 
 ### Payload minimums for date/currency visibility
 
@@ -141,6 +144,8 @@ If pause-pending is still active at step 7, next state snapshot must indicate `p
 - After emitting `server_shutdown`, server may close SSE connections.
 - Clients should treat stream close without prior `server_shutdown` as unexpected failure and apply exponential backoff reconnect.
 - Clients should treat stream close after `server_shutdown` as expected transition and reconnect using provided delay hint.
+- Clients should not surface a transport-error banner for expected close after `server_shutdown`; UI should show an expected lifecycle transition instead.
+- `server_shutdown.will_restart == true` is required for reload-driven restarts (`reason=config_reload_restart`).
 - When `server_shutdown.will_restart == false`, clients may switch from reconnect loop to explicit "server offline" state after bounded retries.
 
 ---

@@ -427,6 +427,12 @@ When a transaction intent routes from Product A to Product B:
 | `v2_foundations` | Spec-only | Authoring, review, and fixture documentation |
 | `v3_runtime` | Runtime-binding | Executable behavior |
 
+#### V3 final-touch scope note (prepaid config only)
+
+- For v3 final-touch updates, prepaid-card pipeline config alignment is limited to schema clarity and fixture parity with `configs/prototype_v3_runtime_example.yaml`.
+- No new pipeline execution semantics are introduced in this pass.
+- Invoice lifecycle and settlement-demand workflows are deferred to v4 even when related schema fields (for example `settlement_trigger_event`) remain present.
+
 ### v3 runtime schema example (illustrative)
 
 ```yaml
@@ -502,8 +508,14 @@ pipeline:
       transaction_intents:
         - intent_id: "Transact-Purchase-Clearing"
           destinations:
-            - destination_role: "upstream_processor"
-              outgoing_intent_id: "Transact-Purchase-Clearing-Upstream"
+            - destination_role: "scheme_access_product"
+              outgoing_intent_id: "Transact-Purchase-Clearing-Scheme"
+              value_date_policy: "same_day"
+              value_date_offset_days: 0
+              amount_basis: "transaction_intent_amount"
+              currency_mode: "inherit"
+            - destination_role: "processor_services_product"
+              outgoing_intent_id: "Transact-Purchase-Clearing-Processor"
               value_date_policy: "same_day"
               value_date_offset_days: 0
               amount_basis: "transaction_intent_amount"
@@ -511,31 +523,31 @@ pipeline:
       ledger_construction:
         - ledger_ref: "customer_funds"
           path_pattern: "[Managed-Funds][{product_role}][Customer-Funds]"
-        - ledger_ref: "settlement_funds_by_counterparty"
-          path_pattern: "[Managed-Funds][{product_role}][Settlement-Funds][{counterparty_role}]"
+        - ledger_ref: "settlement_funds"
+          path_pattern: "[Managed-Funds][{product_role}][Settlement-Funds]"
       posting_rules:
-        - trigger_id: "Transact-Purchase-Clearing-Upstream"
+        - trigger_id: "Transact-Purchase-Clearing"
           source_ledger_ref: "customer_funds"
-          destination_ledger_ref: "settlement_funds_by_counterparty"
+          destination_ledger_ref: "settlement_funds"
           amount_basis: "transaction_intent_amount"
           value_date_policy: "next_working_day_plus_x"
           value_date_offset_days: 0
       value_container_construction:
         - container_ref: "customer_funds_container"
           path_pattern: "[Managed-Funds][Customer-Funds][{product_role}]"
-        - container_ref: "settlement_funds_container_by_counterparty"
-          path_pattern: "[Managed-Funds][Settlement-Funds][{counterparty_role}]"
+        - container_ref: "settlement_funds_container"
+          path_pattern: "[Managed-Funds][Settlement-Funds][{product_role}]"
       asset_transfer_rules:
-        - trigger_id: "Transact-Purchase-Clearing-Upstream"
+        - trigger_id: "Transact-Purchase-Clearing"
           source_container_ref: "customer_funds_container"
-          destination_container_ref: "settlement_funds_container_by_counterparty"
+          destination_container_ref: "settlement_funds_container"
           amount_basis: "transaction_intent_amount"
           value_date_policy: "next_working_day_plus_x"
           value_date_offset_days: 0
       fee_sequences: []
       ledger_value_container_map:
-        - ledger_ref: "settlement_funds_by_counterparty"
-          container_ref: "settlement_funds_container_by_counterparty"
+        - ledger_ref: "settlement_funds"
+          container_ref: "settlement_funds_container"
           mapping_mode: "aggregate"
     - pipeline_profile_id: "scheme_access_pipeline"
       transaction_intents: []
@@ -608,15 +620,9 @@ world:
           pipeline_profile_id: "prepaid_card_pipeline"
           pipeline_role_bindings:
             entity_roles:
-              issuing_product: { product_id: "prod_prepaid_alpha" }
               product_role: { product_id: "prod_prepaid_alpha" }
-              upstream_processor: { agent_id: "upstream_agent_alpha" }
-              payment_scheme: { agent_id: "vendor_scheme" }
-              payment_processor: { agent_id: "vendor_processor" }
               scheme_access_product: { product_id: "prod_scheme_access" }
               processor_services_product: { product_id: "prod_processor_services" }
-              counterparty_role: { agent_id: "upstream_agent_alpha" }
-              local: { local: true }
             default_product_role: "product_role"
     - vendor_id: "vendor_scheme"
       region_id: "region_main"
@@ -676,7 +682,7 @@ world:
 - Calendar supports both first-class holiday sources (`local_file`, `nager_date`) and explicit selection policy.
 - Region references calendar object; working-day rules remain in calendar object.
 - World entities may map to regions via `region_id`, enabling region-specific calendar context.
-- Fee settlement supports `invoice_transaction_event` for deferred collection via direct payment.
+- `settlement_trigger_event` remains part of schema contracts; full invoice lifecycle behavior is deferred to v4 scope.
 - Example YAML files exist for currency catalog, local FX rates, and local calendar holiday overlays.
 
 ### Deferred beyond v0
@@ -685,6 +691,7 @@ world:
 - Rich institution catalogs beyond the single-vendor slice.
 - Deep override layering and anchor/alias conventions.
 - Full command-auth configuration for Person/PiC authority.
+- Invoice and settlement-demand lifecycle behavior (v4 scope).
 
 ---
 

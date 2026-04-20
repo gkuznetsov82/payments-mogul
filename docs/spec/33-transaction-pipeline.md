@@ -18,6 +18,7 @@ Prototype sequencing note: Money/Calendar/FX schema work in v2 is documented in 
 - `v1` (`prototype_vendor_pop_v1`) remains the authoritative runtime behavior until an explicit promotion decision is recorded.
 - `v2` additions in this chapter are normative **schema/contract language** only and are **non-runtime-binding**.
 - `v3` is the first target where promoted pipeline stages become runtime-mandatory.
+- V3 final-touch scope includes observability and contract clarity updates only; routing success-gating/order redesign is deferred to v4.
 - Promotion from `v2` to `v3` requires:
   - contract parity between this chapter and **`40-yaml-config.md`**,
   - deterministic stage-order statement in **`30-architecture.md`**,
@@ -68,6 +69,14 @@ Prototype sequencing note: Money/Calendar/FX schema work in v2 is documented in 
 ## Data for UI and charts
 
 - The pipeline defines what **per-tick** and **per-stage** signals exist for **dashboards** and **drill-down** in debug mode; **throttling and coalescing** for realtime delivery **`52-realtime-ui-protocol.md`**.
+
+### Transaction-intent log visibility contract (v3 final touch)
+
+- For routed flows, logs/stream output must include both:
+  - the original incoming transaction intent (pre-routing),
+  - each routed outgoing derivative intent.
+- Original and derivative records must be correlatable via a shared stable key (for example `root_intent_id`).
+- This visibility requirement is observability-only for v3 and does not change execution semantics.
 
 ---
 
@@ -171,6 +180,8 @@ For this prototype, all listed counters are integer-valued after rounding policy
 - Rich decline hierarchies beyond basic reason codes.
 - Multi-destination transaction-intent routing and aggregation rules from `v2_foundations`.
 - Full posting and asset-transfer contracts from `v2_foundations`.
+- Invoice and settlement-demand lifecycle modeling.
+- Pipeline success-gating/order redesign for routed upstream execution.
 
 ---
 

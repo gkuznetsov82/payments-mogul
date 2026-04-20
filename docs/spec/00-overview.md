@@ -78,6 +78,10 @@ _To complete._ (e.g. MDR, interchange, acquirer, issuer, scheme, etc.)
 - **`72-adr/`** — Architecture Decision Records for costly-to-reverse choices only.
 - **`73-transaction-pipeline-handoff.md`** — RACI boundaries and prioritized implementation handoff backlog for transaction pipeline delivery.
 
+### Ideation notes (non-authoritative)
+
+- **`unstructured-notes/`** — Scratch and ideation notes only. These files are not implementation-driving specs and do not participate in conflict resolution.
+
 ---
 
 ## When specs conflict (which file wins)
@@ -88,6 +92,7 @@ _To complete._ (e.g. MDR, interchange, acquirer, issuer, scheme, etc.)
 4. **UI look and IA** — `12-ui-ux-spec.md`, `62-design-tokens.md`, and `60-screen-specs.md` over stray UI notes in backend docs.
 5. **Recorded architecture choices** — a numbered ADR in `72-adr/` beats older narrative in other specs until those specs are updated.
 6. **This overview** — authoritative for *where* topics live; if two non-ADR specs disagree on substance, prefer the more specific doc for that subdomain (see **Document map** above), then reconcile by editing the stale file.
+7. **Unstructured notes do not override specs** — `docs/spec/unstructured-notes/` never overrides numbered specs or ADRs.
 
 ---
 

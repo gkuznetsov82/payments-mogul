@@ -138,11 +138,11 @@ world:
           product_label: "Alpha Prepaid Card"
           product_class: "RetailPayment-Card-Prepaid"
           onboarding_friction:
-            min: 0.0
-            max: 0.0
+            min: 0.1
+            max: 0.25
           transaction_friction:
-            min: 0.0
-            max: 0.0
+            min: 0.05
+            max: 0.15
           pipeline_profile_id: "prepaid_card_pipeline"
           pipeline_role_bindings:
             entity_roles:
