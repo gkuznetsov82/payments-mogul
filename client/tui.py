@@ -26,9 +26,11 @@ from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widgets import (
-    Button, DataTable, Footer, Header, Label, Log, RichLog, Static,
+    Button, DataTable, Footer, Header, Label, Log, RichLog, Select, Static,
     TabbedContent, TabPane,
 )
+
+from client.widgets import SelectableRichLog
 
 
 BASE_URL = "http://localhost:8000"
@@ -147,10 +149,29 @@ class MogulApp(App):
     Label {
         margin: 1 0 0 0;
     }
-    #event-log, #pipeline-log, #ledger-log {
+    #event-log, #pipeline-log, #books-log, #accounts-log {
         min-height: 8;
         height: 1fr;
         border: solid $surface;
+    }
+    #books-tree, #accounts-tree {
+        height: auto;
+        min-height: 4;
+        padding: 0 1;
+    }
+    .agent-controls-row Button {
+        width: 1fr;
+        margin: 0 1 0 0;
+    }
+    .agent-controls-row {
+        height: 3;
+        margin: 0 0 1 0;
+    }
+    #agent-target-select {
+        margin: 0 0 1 0;
+    }
+    #run-strip .world-btn {
+        width: 22;
     }
     """
 
@@ -163,12 +184,19 @@ class MogulApp(App):
         ("ctrl+p", "pause", "Pause"),
         ("ctrl+n", "next_day", "Next Day"),
         ("ctrl+d", "shutdown_server", "Shutdown server"),
-        # Spec 12 §TUI IA + spec 60: keyboard-switchable observability sections.
+        # Spec 60 §Minimum navigation contract: Run / World / Pipeline / Books /
+        # Accounts / Logs. Run controls live in the always-visible strip.
         ("f1", "view_world", "World"),
         ("f2", "view_pipeline", "Pipeline"),
-        ("f3", "view_ledger", "Ledger"),
-        ("f4", "view_controls", "Controls"),
+        ("f3", "view_books", "Books"),
+        ("f4", "view_accounts", "Accounts"),
         ("f5", "view_logs", "Logs"),
+        # Operator copy of log content. Mouse selection on RichLog already works
+        # (ALLOW_SELECT=True); this keyboard action covers the case where the
+        # terminal eats mouse drag or the user prefers keyboard-only flow.
+        # Copies the currently-focused log's selection (if any) or the whole
+        # log body to the system clipboard via OSC 52.
+        ("ctrl+c", "copy_focused_log", "Copy log"),
     ]
 
     def __init__(self, base_url: str) -> None:
@@ -197,46 +225,94 @@ class MogulApp(App):
         self._reconnect_attempts_since_shutdown: int = 0
         self._max_reconnect_attempts_no_restart: int = 5  # bounded retries when will_restart=false
         self._offline: bool = False
+        # Agent-controls target (spec 51 §Agent controls: explicit target required).
+        # Populated from snapshot as (vendor_id, product_id) pairs become known.
+        self._agent_targets: list[tuple[str, str, str]] = []  # (vendor_id, product_id, label)
+        self._selected_target_key: str = "__none__"
+        # Books (ledger) + Accounts (value container) hierarchy state, populated
+        # from posting_entry_event + value_transfer_event. Key: (product_id, path).
+        self._books_by_path: dict[str, dict] = {}
+        self._accounts_by_path: dict[str, dict] = {}
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield StatusBar(id="status")
         yield Banner(id="banner")
-        # Spec 12 + ADR-0002 clarification 6: timing controls always visible.
+        # Spec 60 §TUI layout: run strip is the always-visible section for timing
+        # controls + world-scoped controls (reload, shutdown). Agent-scoped controls
+        # live in the World tab alongside the target selector so users can see
+        # which vendor/product a command targets.
         with Horizontal(id="run-strip"):
             yield Button("▶  Resume", id="btn-resume", variant="success")
             yield Button("⏸  Pause", id="btn-pause", variant="warning")
             yield Button("⏭  Next Day", id="btn-next-day", variant="primary")
+            yield Button("⟳  Reload Config", id="btn-reload",
+                         variant="primary", classes="world-btn")
+            yield Button("⛔  Shutdown", id="btn-shutdown",
+                         variant="error", classes="world-btn")
             yield Static("", id="ack-label")
-        # Spec 60 §TUI observability views: World/Pipeline/Ledger/Controls/Logs as tabs.
+        # Spec 60 §Minimum navigation contract: baseline required sections are
+        # Run/World/Pipeline/Books/Accounts/Logs.
         with TabbedContent(id="tabs", initial="tab-world"):
             with TabPane("World [F1]", id="tab-world"):
                 with Vertical(classes="tab-pane-content"):
                     yield Static("[bold]Vendor / Product State[/]", id="vendor-info")
                     yield Static("[bold]Pop State[/]", id="pop-info")
+                    yield Label("── Agent Controls (explicit target) ──")
+                    # Select populated from snapshot; required-target contract
+                    # per spec 51 §Agent controls.
+                    yield Select(
+                        options=[("(no target)", "__none__")],
+                        prompt="Select vendor / product target",
+                        id="agent-target-select",
+                        allow_blank=False,
+                    )
+                    with Horizontal(classes="agent-controls-row"):
+                        yield Button("Open OB", id="btn-open-ob")
+                        yield Button("Close OB", id="btn-close-ob", variant="error")
+                    with Horizontal(classes="agent-controls-row"):
+                        yield Button("Open TX", id="btn-open-tx")
+                        yield Button("Close TX", id="btn-close-tx", variant="error")
             with TabPane("Pipeline [F2]", id="tab-pipeline"):
                 with Vertical(classes="tab-pane-content"):
-                    yield Label("Intents · Fees · Transfers · Invoices")
-                    yield RichLog(id="pipeline-log", highlight=True, markup=True)
-            with TabPane("Ledger [F3]", id="tab-ledger"):
+                    yield Label("Intents (original + routed) · Fees · Transfers · Invoices")
+                    yield Static(
+                        "[dim]Focus log → ↑/↓ move line · Shift+↑/↓ extend · "
+                        "Ctrl+A all · Esc clear · Ctrl+C copy selection[/]",
+                        classes="log-hint",
+                    )
+                    yield SelectableRichLog(id="pipeline-log", highlight=True, markup=True, auto_scroll=True)
+            with TabPane("Books [F3]", id="tab-books"):
                 with Vertical(classes="tab-pane-content"):
-                    yield Label("Postings · Settlements · Reconciliation")
-                    yield RichLog(id="ledger-log", highlight=True, markup=True)
-            with TabPane("Controls [F4]", id="tab-controls"):
-                with Vertical(classes="tab-pane-content controls-pane"):
-                    yield Label("── Onboarding ──")
-                    yield Button("Open Onboarding", id="btn-open-ob")
-                    yield Button("Close Onboarding", id="btn-close-ob", variant="error")
-                    yield Label("── Transacting ──")
-                    yield Button("Open Transacting", id="btn-open-tx")
-                    yield Button("Close Transacting", id="btn-close-tx", variant="error")
-                    yield Label("── World ──")
-                    yield Button("⟳  Reload Config", id="btn-reload", variant="primary")
-                    yield Button("⛔  Shutdown Server", id="btn-shutdown", variant="error")
+                    yield Label("[bold]Ledger hierarchy[/] — balances and paths per product")
+                    yield Static("(no postings yet)", id="books-tree")
+                    yield Label("── Posting movements ──")
+                    yield Static(
+                        "[dim]Focus log → ↑/↓ move line · Shift+↑/↓ extend · "
+                        "Ctrl+A all · Esc clear · Ctrl+C copy selection[/]",
+                        classes="log-hint",
+                    )
+                    yield SelectableRichLog(id="books-log", highlight=True, markup=True, auto_scroll=True)
+            with TabPane("Accounts [F4]", id="tab-accounts"):
+                with Vertical(classes="tab-pane-content"):
+                    yield Label("[bold]Value-container hierarchy[/] — funds by owner/product")
+                    yield Static("(no transfers yet)", id="accounts-tree")
+                    yield Label("── Container movements ──")
+                    yield Static(
+                        "[dim]Focus log → ↑/↓ move line · Shift+↑/↓ extend · "
+                        "Ctrl+A all · Esc clear · Ctrl+C copy selection[/]",
+                        classes="log-hint",
+                    )
+                    yield SelectableRichLog(id="accounts-log", highlight=True, markup=True, auto_scroll=True)
             with TabPane("Logs [F5]", id="tab-logs"):
                 with Vertical(classes="tab-pane-content"):
                     yield Label("── Recent Events ──")
-                    yield RichLog(id="event-log", highlight=True, markup=True)
+                    yield Static(
+                        "[dim]Focus log → ↑/↓ move line · Shift+↑/↓ extend · "
+                        "Ctrl+A all · Esc clear · Ctrl+C copy selection[/]",
+                        classes="log-hint",
+                    )
+                    yield SelectableRichLog(id="event-log", highlight=True, markup=True, auto_scroll=True)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -277,7 +353,11 @@ class MogulApp(App):
                                         except json.JSONDecodeError:
                                             pass
             except Exception as exc:
-                self._log_line(f"[red]SSE error: {exc}[/]")
+                # Spec 52 §Shutdown: close after a received `server_shutdown` is
+                # an expected lifecycle transition — do NOT render a transport
+                # error. Banner already reflects the shutdown state.
+                if not self._server_shutdown_received:
+                    self._log_line(f"[red]SSE error: {exc}[/]")
 
             # Stream closed — decide reconnect strategy (52-realtime-ui-protocol §Shutdown)
             if self._server_shutdown_received:
@@ -388,9 +468,15 @@ class MogulApp(App):
         except Exception:
             pass
 
-    def _log_ledger(self, markup: str) -> None:
+    def _log_books(self, markup: str) -> None:
         try:
-            self.query_one("#ledger-log", RichLog).write(f"[dim]{self._ts()}[/] {markup}")
+            self.query_one("#books-log", RichLog).write(f"[dim]{self._ts()}[/] {markup}")
+        except Exception:
+            pass
+
+    def _log_accounts(self, markup: str) -> None:
+        try:
+            self.query_one("#accounts-log", RichLog).write(f"[dim]{self._ts()}[/] {markup}")
         except Exception:
             pass
 
@@ -520,9 +606,16 @@ class MogulApp(App):
             self._log_line(
                 f"[{color}]command_ack[/] {cid}... accepted={accepted} target_tick={target}"
             )
-            self.query_one("#ack-label", Label).update(
-                f"ACK: {'OK' if accepted else 'REJECTED'} T{target}"
-            )
+            # `#ack-label` is a Static (see compose()); query with the correct
+            # type. Guard the update so a missing/mismatched widget never
+            # raises back into _sse_worker (which would mis-surface as a red
+            # "SSE error: ..." transport-error line per spec 52 §Shutdown).
+            try:
+                self.query_one("#ack-label", Static).update(
+                    f"ACK: {'OK' if accepted else 'REJECTED'} T{target}"
+                )
+            except Exception:
+                pass
         elif event_type == "action_outcome":
             atype = data.get("action_type")
             s = data.get("status")
@@ -544,14 +637,32 @@ class MogulApp(App):
                 self._log_line(f"[magenta]inputs_processed[/] T{data.get('tick_id')} commands={n}")
         # ---- Pipeline tab events (spec 52 §Pipeline observability) ----
         elif event_type == "transaction_intent_event":
-            self._log_pipeline(
-                f"[cyan]intent[/] T{data.get('tick_id')} prof={data.get('pipeline_profile_id')} "
-                f"id={data.get('intent_id')} parent={data.get('parent_intent_id')} "
-                f"src={data.get('product_id')} -> {data.get('destination_role')} "
-                f"({data.get('destination_product_id')}) "
-                f"n={data.get('txn_count')} amt={self._fmt_amount(data.get('amount'))} "
-                f"vd={data.get('value_date_policy')}={data.get('resolved_value_date')}"
-            )
+            stage = data.get("intent_stage", "routed_outgoing")
+            root = data.get("root_intent_id", data.get("intent_id"))
+            # Spec 33 §Transaction-intent log visibility: show original_incoming
+            # and routed_outgoing distinctly, with shared root_intent_id column.
+            if stage == "original_incoming":
+                self._log_pipeline(
+                    f"[bold cyan]intent[original][/] T{data.get('tick_id')} "
+                    f"prof={data.get('pipeline_profile_id')} "
+                    f"id={data.get('intent_id')} root={root} "
+                    f"src={data.get('product_id')} "
+                    f"n={data.get('txn_count')} amt={self._fmt_amount(data.get('amount'))}"
+                )
+            else:
+                status = data.get("status", "executed")
+                reason = data.get("reason_code", "OK")
+                color = "cyan" if status == "executed" else "red"
+                self._log_pipeline(
+                    f"[{color}]intent[routed/{status}][/] T{data.get('tick_id')} "
+                    f"prof={data.get('pipeline_profile_id')} "
+                    f"id={data.get('intent_id')} root={root} "
+                    f"src={data.get('product_id')} -> {data.get('destination_role')} "
+                    f"({data.get('destination_product_id')}) "
+                    f"n={data.get('txn_count')} amt={self._fmt_amount(data.get('amount'))} "
+                    f"vd={data.get('value_date_policy')}={data.get('resolved_value_date')} "
+                    f"reason={reason}"
+                )
         elif event_type == "fee_accrual_event":
             self._log_pipeline(
                 f"[yellow]fee[/] T{data.get('tick_id')} prof={data.get('pipeline_profile_id')} "
@@ -564,29 +675,32 @@ class MogulApp(App):
                 f"due={data.get('settlement_due_date')} status={data.get('status')}"
             )
         elif event_type == "value_transfer_event":
-            self._log_pipeline(
+            # Spec 60 §View D — Accounts: value-container movements.
+            self._log_accounts(
                 f"[green]xfer[/] T{data.get('tick_id')} prof={data.get('pipeline_profile_id')} "
                 f"id={data.get('transfer_id')} trig={data.get('trigger_id')} "
                 f"{data.get('source_container_path')} -> {data.get('destination_container_path')} "
                 f"amt={self._fmt_amount(data.get('amount'))} status={data.get('status')}"
             )
+            self._record_account_movement(data)
         elif event_type == "invoice_transaction_event":
             self._log_pipeline(
                 f"[bold yellow]invoice[/] T{data.get('tick_id')} due={data.get('simulation_date')} "
                 f"id={data.get('invoice_id')} fee={data.get('fee_id')} "
                 f"amt={self._fmt_amount(data.get('amount'))} status={data.get('status')}"
             )
-        # ---- Ledger tab events ----
+        # ---- Books tab events (spec 60 §View C — ledger hierarchy) ----
         elif event_type == "posting_entry_event":
-            self._log_ledger(
+            self._log_books(
                 f"[cyan]post[/] T{data.get('tick_id')} prof={data.get('pipeline_profile_id')} "
                 f"id={data.get('posting_id')} trig={data.get('trigger_id')} "
                 f"{data.get('source_ledger_path')} -> {data.get('destination_ledger_path')} "
                 f"amt={self._fmt_amount(data.get('amount'))} "
                 f"vd={data.get('value_date_policy')}={data.get('resolved_value_date')}"
             )
+            self._record_book_movement(data)
         elif event_type == "settlement_resolution_event":
-            self._log_ledger(
+            self._log_books(
                 f"[bold green]settle[/] T{data.get('tick_id')} inv={data.get('invoice_id')} "
                 f"fee={data.get('fee_id')} mode={data.get('mode')} "
                 f"settled={self._fmt_amount(data.get('settled_amount'))} "
@@ -603,6 +717,12 @@ class MogulApp(App):
             gen = data.get("world_generation")
             self._set_banner("")
             self._log_line(f"[green]world_restarted[/] gen={gen} tick={data.get('tick_id')}")
+            # Fresh world → drop accumulated hierarchy state so the Books/Accounts
+            # views don't carry over balances from the previous world generation.
+            self._books_by_path.clear()
+            self._accounts_by_path.clear()
+            self._render_books_tree()
+            self._render_accounts_tree()
             snap = data.get("snapshot")
             if snap:
                 self._apply_snapshot(snap)
@@ -680,6 +800,10 @@ class MogulApp(App):
                 )
         self.query_one("#vendor-info", Static).update("\n".join(vendor_lines) or "No vendors")
 
+        # Agent-controls target list — rebuild from snapshot so reloads pick up
+        # new vendor/product shape (spec 51 §Agent controls requires explicit target).
+        self._refresh_agent_targets(snap)
+
         # Pop info
         pop_lines = []
         for pid, pdata in snap.get("pops", {}).items():
@@ -694,6 +818,172 @@ class MogulApp(App):
                         f"onboarded={self._fmt_count(link['onboarded_count'])}"
                     )
         self.query_one("#pop-info", Static).update("\n".join(pop_lines) or "No pops")
+
+    # ------------------------------------------------------------------ Books / Accounts aggregation (spec 60 §Views C/D)
+
+    def _record_book_movement(self, d: dict) -> None:
+        """Update book hierarchy from a posting_entry_event.
+
+        Books group by product_id -> ledger_ref -> path. We track aggregate
+        debit totals per destination_path and credit totals per source_path
+        so the tree view shows a running sum; full balance reconciliation lives
+        in the engine SQLite store.
+        """
+        amount = d.get("amount") or {}
+        amt_val = 0.0
+        if isinstance(amount, dict):
+            try:
+                amt_val = float(amount.get("amount", 0))
+            except (TypeError, ValueError):
+                amt_val = 0.0
+        currency = amount.get("currency") if isinstance(amount, dict) else None
+        product = d.get("product_id") or "(unknown)"
+        for path, ref, sign in (
+            (d.get("source_ledger_path"), d.get("source_ledger_ref"), -1.0),
+            (d.get("destination_ledger_path"), d.get("destination_ledger_ref"), +1.0),
+        ):
+            if not path:
+                continue
+            key = f"{product}::{path}"
+            entry = self._books_by_path.setdefault(key, {
+                "product_id": product,
+                "ledger_ref": ref,
+                "path": path,
+                "currency": currency,
+                "net": 0.0,
+                "n": 0,
+            })
+            entry["net"] += sign * amt_val
+            entry["n"] += 1
+        self._render_books_tree()
+
+    def _record_account_movement(self, d: dict) -> None:
+        """Update account hierarchy from a value_transfer_event."""
+        amount = d.get("amount") or {}
+        amt_val = 0.0
+        if isinstance(amount, dict):
+            try:
+                amt_val = float(amount.get("amount", 0))
+            except (TypeError, ValueError):
+                amt_val = 0.0
+        currency = amount.get("currency") if isinstance(amount, dict) else None
+        product = d.get("product_id") or "(unknown)"
+        for path, ref, sign in (
+            (d.get("source_container_path"), d.get("source_container_ref"), -1.0),
+            (d.get("destination_container_path"), d.get("destination_container_ref"), +1.0),
+        ):
+            if not path:
+                continue
+            key = f"{product}::{path}"
+            entry = self._accounts_by_path.setdefault(key, {
+                "product_id": product,
+                "container_ref": ref,
+                "path": path,
+                "currency": currency,
+                "net": 0.0,
+                "n": 0,
+            })
+            entry["net"] += sign * amt_val
+            entry["n"] += 1
+        self._render_accounts_tree()
+
+    def _render_books_tree(self) -> None:
+        """Render a product-grouped hierarchy of ledger paths + net balances."""
+        try:
+            widget = self.query_one("#books-tree", Static)
+        except Exception:
+            return
+        if not self._books_by_path:
+            widget.update("(no postings yet)")
+            return
+        by_product: dict[str, list[dict]] = {}
+        for entry in self._books_by_path.values():
+            by_product.setdefault(entry["product_id"], []).append(entry)
+        lines: list[str] = []
+        for pid in sorted(by_product):
+            lines.append(f"[bold]{pid}[/]")
+            for entry in sorted(by_product[pid], key=lambda e: e["path"]):
+                ccy = entry["currency"] or ""
+                lines.append(
+                    f"  {entry['path']}  "
+                    f"[dim]ref={entry['ledger_ref']} n={entry['n']}[/]  "
+                    f"net={entry['net']:,.{self._amount_scale_dp}f} {ccy}".rstrip()
+                )
+        widget.update("\n".join(lines))
+
+    def _render_accounts_tree(self) -> None:
+        """Render a product-grouped hierarchy of container paths + net balances."""
+        try:
+            widget = self.query_one("#accounts-tree", Static)
+        except Exception:
+            return
+        if not self._accounts_by_path:
+            widget.update("(no transfers yet)")
+            return
+        by_product: dict[str, list[dict]] = {}
+        for entry in self._accounts_by_path.values():
+            by_product.setdefault(entry["product_id"], []).append(entry)
+        lines: list[str] = []
+        for pid in sorted(by_product):
+            lines.append(f"[bold]{pid}[/]")
+            for entry in sorted(by_product[pid], key=lambda e: e["path"]):
+                ccy = entry["currency"] or ""
+                lines.append(
+                    f"  {entry['path']}  "
+                    f"[dim]ref={entry['container_ref']} n={entry['n']}[/]  "
+                    f"net={entry['net']:,.{self._amount_scale_dp}f} {ccy}".rstrip()
+                )
+        widget.update("\n".join(lines))
+
+    def _refresh_agent_targets(self, snap: dict) -> None:
+        """Populate the agent-controls target selector from snapshot vendors/products.
+
+        Spec 51 §Agent controls: commands require explicit agent/product target
+        context. The select widget enumerates every (vendor_id, product_id) pair
+        and is the required input for gate-change commands.
+        """
+        targets: list[tuple[str, str, str]] = []
+        for vid, vdata in snap.get("vendors", {}).items():
+            vlabel = vdata.get("vendor_label", vid)
+            for pid, pdata in vdata.get("products", {}).items():
+                plabel = pdata.get("product_label", pid)
+                targets.append((vid, pid, f"{vlabel} / {plabel}"))
+        if targets == self._agent_targets:
+            return
+        self._agent_targets = targets
+        try:
+            select = self.query_one("#agent-target-select", Select)
+        except Exception:
+            return
+        options = [(label, f"{vid}::{pid}") for vid, pid, label in targets]
+        if not options:
+            options = [("(no target)", "__none__")]
+        select.set_options(options)
+        # Preserve previous selection if still valid; otherwise pick the first.
+        keys = {v for _, v in options}
+        if self._selected_target_key not in keys:
+            self._selected_target_key = options[0][1]
+        select.value = self._selected_target_key
+
+    def _resolve_target(self) -> tuple[str | None, str | None]:
+        """Return (vendor_id, product_id) for the currently-selected target, or (None, None)."""
+        try:
+            select = self.query_one("#agent-target-select", Select)
+        except Exception:
+            return None, None
+        val = select.value
+        if not val or val == "__none__":
+            return None, None
+        self._selected_target_key = val
+        try:
+            vid, pid = val.split("::", 1)
+            return vid, pid
+        except ValueError:
+            return None, None
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "agent-target-select":
+            self._selected_target_key = event.value  # type: ignore[assignment]
 
     # ------------------------------------------------------------------ button handlers
 
@@ -722,11 +1012,18 @@ class MogulApp(App):
                     "btn-open-tx": "OpenTransacting",
                     "btn-close-tx": "CloseTransacting",
                 }[bid]
+                vid, pid = self._resolve_target()
+                if vid is None or pid is None:
+                    self._log_line(
+                        f"[red]{ctype}[/] rejected locally: "
+                        "no agent target selected (spec 51 §Agent controls)"
+                    )
+                    return
                 await self._http.post("/command", json={
                     "command_id": str(uuid.uuid4()),
                     "command_type": ctype,
-                    "vendor_id": "vendor_alpha",
-                    "product_id": "prod_prepaid_alpha",
+                    "vendor_id": vid,
+                    "product_id": pid,
                 })
         except httpx.RequestError as exc:
             self._log_line(f"[red]HTTP error: {exc}[/]")
@@ -795,11 +1092,11 @@ class MogulApp(App):
     def action_view_pipeline(self) -> None:
         self._switch_tab("tab-pipeline")
 
-    def action_view_ledger(self) -> None:
-        self._switch_tab("tab-ledger")
+    def action_view_books(self) -> None:
+        self._switch_tab("tab-books")
 
-    def action_view_controls(self) -> None:
-        self._switch_tab("tab-controls")
+    def action_view_accounts(self) -> None:
+        self._switch_tab("tab-accounts")
 
     def action_view_logs(self) -> None:
         self._switch_tab("tab-logs")
@@ -810,6 +1107,114 @@ class MogulApp(App):
             self._log_control_response("shutdown", r)
         except httpx.RequestError as exc:
             self._log_line(f"[red]HTTP error: {exc}[/]")
+
+    def _pick_copy_target(self) -> "RichLog | None":
+        """Pick which RichLog to copy from (focused log, else active-tab log)."""
+        focused = self.focused
+        if isinstance(focused, RichLog):
+            return focused
+        try:
+            active = self.query_one("#tabs", TabbedContent).active
+        except Exception:
+            active = ""
+        tab_log = {
+            "tab-logs": "event-log",
+            "tab-pipeline": "pipeline-log",
+            "tab-books": "books-log",
+            "tab-accounts": "accounts-log",
+        }.get(active, "event-log")
+        for lid in (tab_log, "event-log", "pipeline-log", "books-log", "accounts-log"):
+            try:
+                return self.query_one(f"#{lid}", RichLog)
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _log_to_plain_text(target: "RichLog") -> str:
+        """Collect the RichLog's text content as plain text, one line per entry.
+
+        RichLog defers write() until the widget is sized — so a log in an
+        inactive tab holds its lines in `_deferred_renders` and `lines` stays
+        empty. For operator copy UX, we want both rendered + deferred content;
+        fall back to the deferred buffer so Ctrl+C still produces something
+        useful from an off-screen log.
+        """
+        # Prefer already-rendered strips (they carry the actual displayed text).
+        rendered = []
+        for strip in getattr(target, "lines", []) or []:
+            text = getattr(strip, "text", None)
+            rendered.append(text if text is not None else str(strip))
+        if rendered:
+            return "\n".join(rendered)
+        # Fallback: drain the deferred write queue. Keeps Rich markup tokens
+        # in the copied text — acceptable because operators typically paste
+        # into tickets or chat where markup renders or is trivially stripped.
+        deferred = []
+        for dr in getattr(target, "_deferred_renders", []) or []:
+            content = getattr(dr, "content", None)
+            if content is None:
+                continue
+            deferred.append(str(content))
+        return "\n".join(deferred)
+
+    def action_copy_focused_log(self) -> None:
+        """Copy the focused log's line selection (or full content) to clipboard.
+
+        Ctrl+C copy priority (spec 60 §Accessibility: operator workflows remain
+        keyboard-reachable):
+
+          1. `SelectableRichLog.copy_text()` — precise line-range selection
+             the operator picked with Up/Down + Shift+Up/Down (the ordinary
+             case: "copy just THIS line please").
+          2. The widget's mouse-driven `text_selection` if any — only fires on
+             widgets whose container actually delivers drag-as-selection
+             events; `ScrollableContainer`-rooted widgets usually don't, which
+             is exactly why we added the keyboard line cursor.
+          3. Full log buffer — last-resort dump. Operator probably wanted a
+             single line; log which was used so they can retry with a
+             selection.
+        """
+        target = self._pick_copy_target()
+        if target is None:
+            return
+        text = ""
+        mode = "empty"
+        # 1. Keyboard-driven line selection on our custom widget.
+        copy_text = getattr(target, "copy_text", None)
+        if callable(copy_text):
+            try:
+                picked = copy_text()
+                if picked:
+                    text = picked
+                    mode = "selection"
+            except Exception:
+                pass
+        # 2. Generic widget text_selection (mouse-drag selection).
+        if not text:
+            try:
+                selection = target.text_selection
+                if selection is not None:
+                    text = target.get_selection(selection) or ""
+                    if text:
+                        mode = "mouse-selection"
+            except Exception:
+                text = ""
+        # 3. Whole log.
+        if not text:
+            text = self._log_to_plain_text(target)
+            if text:
+                mode = "full-log"
+        if not text:
+            return
+        try:
+            self.copy_to_clipboard(text)
+        except Exception:
+            return
+        self._log_line(
+            f"[dim]copied {len(text)} chars from #{target.id} "
+            f"({mode}) to clipboard[/]"
+        )
 
 
 # ------------------------------------------------------------------ entrypoint

@@ -74,16 +74,20 @@ To support pipeline/ledger observability sections in **`60-screen-specs.md`**, s
   - intent creation/routing details, source product, destination role/product, value date policy + resolved date.
   - must include `intent_stage` (`original_incoming` or `routed_outgoing`) so operators can see both original and derivative intents in logs.
   - must include a stable correlation reference (`root_intent_id`) shared by the original intent and all routed derivatives.
+  - for routed intents, payload should include:
+    - `routing_completion_mode` (`synchronous` | `asynchronous`)
+    - execution status (`pending` | `executed` | `rejected`)
+    - reason code for non-success paths.
 - `fee_accrual_event`
   - fee id, beneficiary role/product, amount components (`count_cost`, `amount_percentage`), accrual status.
 - `value_transfer_event`
   - source/destination container refs, amount, value date policy + resolved date, execution status.
 - `posting_entry_event`
   - source/destination ledger refs, debit/credit amount, posting date/status.
-- `invoice_transaction_event` (deferred to v4)
-  - deferred settlement event family remains outside this v3 final-touch scope.
-- `settlement_resolution_event` (deferred to v4)
-  - invoice/settlement resolution lifecycle is deferred to v4.
+- `invoice_transaction_event`
+  - emitted on due-date lifecycle transition from accrued fee to invoiced artifact, representing aggregated fees due on the same date.
+- `settlement_resolution_event`
+  - emitted after invoice handling with final settlement outcome (`paid` or `failed`) and residual amount.
 
 Event payloads should include consistent correlation keys for cross-view drill-down:
 
@@ -93,6 +97,8 @@ Event payloads should include consistent correlation keys for cross-view drill-d
 - `product_id`
 - one or more of `intent_id`, `trigger_id`, `fee_id`, `invoice_id`
 - `root_intent_id` when intent fan-out/routing occurs
+
+For async fan-out paths, `transaction_intent_event` resolution emissions should reuse the same `intent_id` + `root_intent_id` as the original pending routed emission.
 
 ### Payload minimums for date/currency visibility
 
@@ -118,6 +124,12 @@ For a given tick `T`, lifecycle events must preserve order:
 4. `tick_committed`
 
 Command and outcome events may interleave by phase, but must not violate this lifecycle order.
+
+For asynchronous routed legs, cross-tick ordering should follow:
+
+1. origin tick emits routed intent as `pending`,
+2. resolution tick emits routed intent as `executed` or `rejected`,
+3. if resolved `executed`, destination-side fee/posting/transfer events may follow in that same resolution tick.
 
 When pause is requested during intake-open for tick `T`:
 

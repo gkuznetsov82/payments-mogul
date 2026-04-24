@@ -1,7 +1,7 @@
 # YAML Configuration
 
 **Status:** Draft
-**Binding level:** Mixed (`v0/v1` runtime-binding core, `v2_foundations` spec-only extensions, `v3_runtime` runtime-binding for promoted pipeline scope)
+**Binding level:** Mixed (`v0/v1` runtime-binding core, `v2_foundations` spec-only extensions, `v3_runtime` runtime-binding for promoted pipeline scope, v4 semantics on routed completion + settlement lifecycle)
 
 ## Purpose
 
@@ -20,6 +20,7 @@ This chapter also defines the **Prototype v2 foundations schema surface** for Mo
 - Allowed pipeline schema values:
   - `v2_foundations` (spec-only, non-runtime-binding)
   - `v3_runtime` (runtime-binding)
+- For prototype v4 scope, routed completion + settlement lifecycle semantics are executed under `v3_runtime` configs until a separate schema-version gate is introduced by ADR.
 - Promotion of pipeline fields from reserved/spec-only to runtime-binding requires aligned updates in:
   - **`33-transaction-pipeline.md`** (behavior contract),
   - **`30-architecture.md`** (determinism/ordering contract),
@@ -335,6 +336,7 @@ This section formalizes transaction-pipeline config contracts. Binding depends o
     - `value_date_offset_days` (`integer`, `>= 0`) - required when `value_date_policy` contains `plus_x`
     - `amount_basis` (`string`) - reference token (for example `transaction_intent_amount`)
     - `currency_mode` (`string`) - `inherit`, `fixed_currency`, or `fx_convert`
+    - `routing_completion_mode` (`string`) - `synchronous` or `asynchronous`; default `synchronous`
   - `ledger_construction` (`array[object]`) - posting ledger construction contracts:
   - `ledger_ref` (`string`, unique) - symbolic reference used by posting rules
   - `path_pattern` (`string`) - ledger path template that may include role placeholders, e.g. `{product_role}` / `{counterparty_role}`
@@ -411,6 +413,19 @@ When a transaction intent routes from Product A to Product B:
   - remaining parameters carrying routed transaction details (at minimum `intent_id`, amount/currency context, and value-date policy/offset).
 - Product B then executes its own attached `pipeline_profile_id` from that handoff context.
 
+#### Routing completion mode (required semantics)
+
+- `destinations[].routing_completion_mode` controls whether root routing waits on a destination leg:
+  - `synchronous`:
+    - leg is root-blocking for success determination,
+    - leg must resolve within current tick execution boundary,
+    - future value-date legs are invalid and fail config loading.
+  - `asynchronous`:
+    - root intent does not wait across ticks,
+    - leg is tracked as pending and resolves on/after value date,
+    - downstream destination stages execute only after successful async resolution.
+- Authoring default is `synchronous`; explicit declaration is strongly recommended for every destination in v4-targeted configs.
+
 #### Value-date offset rules (required)
 
 - If `value_date_policy` or `settlement_value_date_policy` contains `plus_x`, corresponding offset field is mandatory:
@@ -431,7 +446,7 @@ When a transaction intent routes from Product A to Product B:
 
 - For v3 final-touch updates, prepaid-card pipeline config alignment is limited to schema clarity and fixture parity with `configs/prototype_v3_runtime_example.yaml`.
 - No new pipeline execution semantics are introduced in this pass.
-- Invoice lifecycle and settlement-demand workflows are deferred to v4 even when related schema fields (for example `settlement_trigger_event`) remain present.
+- V4 runtime semantics are additive on top of this contract: routing completion mode and full invoice/settlement lifecycle behavior are now implementation-targeted.
 
 ### v3 runtime schema example (illustrative)
 
@@ -682,7 +697,8 @@ world:
 - Calendar supports both first-class holiday sources (`local_file`, `nager_date`) and explicit selection policy.
 - Region references calendar object; working-day rules remain in calendar object.
 - World entities may map to regions via `region_id`, enabling region-specific calendar context.
-- `settlement_trigger_event` remains part of schema contracts; full invoice lifecycle behavior is deferred to v4 scope.
+- `settlement_trigger_event` remains part of schema contracts and is runtime-targeted with invoice/settlement lifecycle processing in v4 scope.
+- `routing_completion_mode` on destinations defines root-blocking (`synchronous`) vs deferred (`asynchronous`) fan-out behavior.
 - Example YAML files exist for currency catalog, local FX rates, and local calendar holiday overlays.
 
 ### Deferred beyond v0
@@ -691,7 +707,7 @@ world:
 - Rich institution catalogs beyond the single-vendor slice.
 - Deep override layering and anchor/alias conventions.
 - Full command-auth configuration for Person/PiC authority.
-- Invoice and settlement-demand lifecycle behavior (v4 scope).
+- Rail-level settlement netting/dispute workflows beyond direct-payment lifecycle.
 
 ---
 

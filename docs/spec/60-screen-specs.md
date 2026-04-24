@@ -26,6 +26,8 @@ Per-screen UI blueprint: components, data bindings, states.
   - agent controls: onboarding/transacting commands with explicit agent/product target selection.
 - **Text command log** — append `command_ack` events with accepted/rejected and target tick fields.
 - **Text outcome log** — append `action_outcome` lines for onboarding/transact request/decision results.
+- **Text log copyability requirement** — operator-visible logs (command, lifecycle, pipeline, books/accounts movement logs) must be selectable and copyable with standard keyboard flow (including Ctrl+C) so errors can be extracted verbatim.
+- **Text log resilience requirement** — rendering of command acknowledgements and lifecycle lines must not raise UI type/runtime errors; log surfaces must keep accepting new lines after command events.
 - **Text snapshot block** — latest post-commit values for key pop/vendor/product counters and gates.
 - **Text snapshot block** — must show:
   - `simulation_date`

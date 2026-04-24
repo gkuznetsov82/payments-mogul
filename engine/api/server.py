@@ -169,6 +169,7 @@ async def submit_command(req: CommandRequest):
         "target_tick": ack.target_tick,
         "processed_in_tick": ack.processed_in_tick,
         "rejection_reason": ack.rejection_reason,
+        "command_scope": ack.command_scope,
     }
 
 
@@ -226,6 +227,7 @@ async def control_shutdown():
         "grace_period_ms": grace_ms,
         "reconnect_after_ms": reconnect_ms,
         "will_restart": False,
+        "command_scope": "world",
     }
 
 

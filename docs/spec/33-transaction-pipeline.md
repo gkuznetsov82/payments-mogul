@@ -1,7 +1,7 @@
 # Transaction Pipeline
 
 **Status:** Draft
-**Binding level:** Mixed (`v1` runtime-binding baseline, `v2` spec-only contract surface, `v3` runtime-binding for promoted pipeline scope)
+**Binding level:** Mixed (`v1` runtime-binding baseline, `v2` spec-only contract surface, `v3` runtime-binding for promoted pipeline scope; prototype v4 semantics execute under `v3_runtime` until a separate schema gate is introduced by ADR)
 
 ## Purpose
 
@@ -18,7 +18,8 @@ Prototype sequencing note: Money/Calendar/FX schema work in v2 is documented in 
 - `v1` (`prototype_vendor_pop_v1`) remains the authoritative runtime behavior until an explicit promotion decision is recorded.
 - `v2` additions in this chapter are normative **schema/contract language** only and are **non-runtime-binding**.
 - `v3` is the first target where promoted pipeline stages become runtime-mandatory.
-- V3 final-touch scope includes observability and contract clarity updates only; routing success-gating/order redesign is deferred to v4.
+- V3 final-touch scope includes observability and contract clarity updates only.
+- Prototype `v4` semantic scope promotes routed completion semantics (sync/async fan-out), root-intent success-gating, and invoice/settlement lifecycle behavior under current `v3_runtime` gate.
 - Promotion from `v2` to `v3` requires:
   - contract parity between this chapter and **`40-yaml-config.md`**,
   - deterministic stage-order statement in **`30-architecture.md`**,
@@ -125,6 +126,35 @@ These artifacts formalize the unstructured transaction-pipeline notes and are no
   - remaining parameters carry the routed transaction-intent details (intent id, amounts, currency, value-date policy/offset, and other required metadata),
   - destination product pipeline executes from that received context.
 
+### Destination gate-honor contract (v3 runtime)
+
+- Destination handoff must honor destination vendor/product transact gates before running downstream stages.
+- If destination adjudication returns non-success (`VENDOR_NOT_OPERATIONAL`, `PRODUCT_NOT_FOUND`, `TRANSACT_CLOSED`, or equivalent failure), destination-side downstream stages for that routed intent must not run.
+- In that failure path:
+  - the routed intent remains visible in observability output,
+  - routed intent status/reason must indicate failure,
+  - destination fees/postings/transfers for that failed routed intent must not be emitted.
+- This is a gate-honor correctness requirement for current runtime behavior, not a v4 redesign of multi-provider routing semantics.
+
+### Fan-out completion semantics (v4 runtime)
+
+- Every routed destination leg should explicitly declare `routing_completion_mode`; if omitted, default is `synchronous`:
+  - `synchronous`
+  - `asynchronous`
+- `synchronous` leg semantics:
+  - the source/root intent may succeed only if all required synchronous legs (and any fanning out synchronous legs that it may have in turn - recursively to the end of the graph) succeed within the same tick execution boundary,
+  - if a synchronous leg is value-dated beyond current tick it will result in config validation error and such model will not be loaded.
+- `asynchronous` leg semantics:
+  - root intent resolution does not wait across ticks for that leg,
+  - routed leg is emitted as pending at origin tick and resolved on/after its value date,
+  - destination-side downstream stages (fees, postings, transfers) run only after resolved successful handoff.
+- Root intent success-gating:
+  - evaluate only synchronous required legs for blocking success,
+  - asynchronous leg outcomes do not retroactively flip already-resolved root outcome.
+- Correlation requirements:
+  - root and all routed derivatives keep a shared `root_intent_id`,
+  - async resolution events for routed legs must preserve the same `root_intent_id` + `intent_id`.
+
 ### Invoice-triggered fee settlement (v2 contract, v3 runtime)
 
 - For fee contracts that settle on `next_month_day_plus_x`, beneficiary side emits an `InvoiceTransactionEvent` on the due date.
@@ -133,6 +163,18 @@ These artifacts formalize the unstructured transaction-pipeline notes and are no
 - Fee accrual and fee collection are separate lifecycle steps:
   - accrual occurs when fee is computed,
   - collection occurs when invoice event is generated/reconciled at due date.
+
+### Invoice and settlement lifecycle (v4 runtime)
+
+- Minimum lifecycle states:
+  - fee: `accrued`
+  - invoice: `invoiced`
+  - settlement resolution: `paid` or `failed` (with residual when non-zero)
+- Lifecycle ordering:
+  1. fee accrual at fee stage,
+  2. invoice emission on due date trigger (aggregating all fees of the same type / recipient that are due on the same date),
+  3. settlement resolution emitted after invoice handling.
+- For prototype v4 scope, direct-payment settlement remains allowed as the default path; settlement netting remains optional/deferred unless explicitly enabled by a later spec update.
 
 ### Iteration fee sinks profile (v2 spec-only)
 
@@ -180,8 +222,7 @@ For this prototype, all listed counters are integer-valued after rounding policy
 - Rich decline hierarchies beyond basic reason codes.
 - Multi-destination transaction-intent routing and aggregation rules from `v2_foundations`.
 - Full posting and asset-transfer contracts from `v2_foundations`.
-- Invoice and settlement-demand lifecycle modeling.
-- Pipeline success-gating/order redesign for routed upstream execution.
+- Rail-level settlement-netting and dispute workflows beyond direct-payment settlement path.
 
 ---
 

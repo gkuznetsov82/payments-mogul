@@ -19,7 +19,7 @@ Define the architecture-to-implementation handoff contract for transaction pipel
 |---|---|---|
 | Requirements and scope boundaries | **A/R** | C |
 | Spec authoring (`30`, `33`, `40`) | **A/R** | C |
-| Versioning and promotion decisions (`v1`/`v2_foundations`/`v3_runtime`) | **A/R** | C |
+| Versioning and promotion decisions (`v1`/`v2_foundations`/`v3_runtime` + v4 semantic scope) | **A/R** | C |
 | Runtime code/config/test changes | C | **A/R** |
 | Determinism and conformance verification against approved specs | A | **R** |
 | Requirement change requests discovered during coding | **A/R** | C |
@@ -40,6 +40,10 @@ Legend: `A` = Accountable, `R` = Responsible, `C` = Consulted.
   - Runtime-binding profile for full pipeline expansion.
   - Execution order must be deterministic and aligned to chapter `33`.
   - Promotion is approved by ADR-0002 for configs that declare `pipeline_schema_version: v3_runtime`.
+- `v4` semantic scope (prototype)
+  - Routing completion semantics (`synchronous`/`asynchronous`) and root success-gating are runtime-mandatory.
+  - Invoice/settlement lifecycle events are runtime-mandatory.
+  - For current prototype stage, these semantics run under `v3_runtime` config gate unless superseded by ADR.
 
 ---
 
@@ -75,6 +79,23 @@ Legend: `A` = Accountable, `R` = Responsible, `C` = Consulted.
 **Acceptance criteria**
 - Test suite demonstrates positive and negative cases for new contracts.
 - Evidence pack traceably maps implementation behavior back to spec sections.
+
+### P3 - V4 routing + settlement lifecycle semantics
+
+1. Implement `routing_completion_mode` per destination leg with deterministic behavior:
+   - synchronous legs are root-blocking within current tick boundary,
+   - asynchronous legs resolve in later ticks without blocking root outcome.
+2. Implement root-intent success-gating from synchronous legs only.
+3. Implement invoice/settlement lifecycle transitions and stream events (`invoice_transaction_event`, `settlement_resolution_event`) with correlation continuity.
+4. Add tests/fixtures for:
+   - synchronous same-day success,
+   - synchronous deferred-leg failure-fast behavior,
+   - asynchronous pending then resolved behavior across ticks.
+
+**Acceptance criteria**
+- Root intent outcome follows declared routing completion modes deterministically.
+- Async routed intents never block root transaction completion across ticks.
+- Invoice and settlement lifecycle events are emitted with stable correlation keys and correct state progression.
 
 ---
 

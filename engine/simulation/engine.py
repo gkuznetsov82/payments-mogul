@@ -54,6 +54,11 @@ class CommandAck:
     target_tick: int | None
     processed_in_tick: int | None
     rejection_reason: str | None
+    # Per spec 51 §Minimum command acknowledgement envelope: "world" | "agent".
+    # Agent gate commands (OpenOnboarding etc.) are "agent" scope; control-plane
+    # actions (reload, shutdown, pause, resume) are "world" scope and carry their
+    # own response shape.
+    command_scope: str = "agent"
 
 
 class SimulationEngine:
@@ -234,16 +239,20 @@ class SimulationEngine:
         if self._intake_frozen:
             self._pause_requested = False
             self._resume_event.set()
-            return {"accepted": True, "effect": "resumed_from_pause_pending", "run_mode": "running"}
+            return {"accepted": True, "effect": "resumed_from_pause_pending",
+                    "run_mode": "running", "command_scope": "world"}
         if self.state == EngineState.RUNNING and self._pause_requested:
             self._pause_requested = False
-            return {"accepted": True, "effect": "cancelled_pause_pending", "run_mode": "running"}
+            return {"accepted": True, "effect": "cancelled_pause_pending",
+                    "run_mode": "running", "command_scope": "world"}
         if self.state in (EngineState.IDLE, EngineState.PAUSED):
             self._pause_requested = False
             self.state = EngineState.RUNNING
             self._continuous_task = asyncio.get_event_loop().create_task(self._run_continuous())
-            return {"accepted": True, "effect": "immediate", "run_mode": "running"}
-        return {"accepted": True, "effect": "noop", "run_mode": self.run_mode}
+            return {"accepted": True, "effect": "immediate",
+                    "run_mode": "running", "command_scope": "world"}
+        return {"accepted": True, "effect": "noop",
+                "run_mode": self.run_mode, "command_scope": "world"}
 
     async def pause(self) -> dict:
         """Request pause. Freezes intake countdown if intake is open;
@@ -253,20 +262,24 @@ class SimulationEngine:
         accepted, effect (freeze_intake_pending | pause_after_tick_commit | noop), run_mode.
         """
         if self.state in (EngineState.PAUSED, EngineState.IDLE):
-            return {"accepted": True, "effect": "noop", "run_mode": self.run_mode}
+            return {"accepted": True, "effect": "noop",
+                    "run_mode": self.run_mode, "command_scope": "world"}
         if self._intake_frozen:
-            return {"accepted": True, "effect": "noop", "run_mode": self.run_mode}
+            return {"accepted": True, "effect": "noop",
+                    "run_mode": self.run_mode, "command_scope": "world"}
 
         self._pause_requested = True
 
         if self._intake_open:
             # _intake_wait poll will detect this and emit intake_countdown_paused
-            return {"accepted": True, "effect": "freeze_intake_pending", "run_mode": "pause_pending"}
+            return {"accepted": True, "effect": "freeze_intake_pending",
+                    "run_mode": "pause_pending", "command_scope": "world"}
         await self._emit("pause_requested", {
             "tick_id": self.tick_id + 1,
             "freeze_intake": False,
         })
-        return {"accepted": True, "effect": "pause_after_tick_commit", "run_mode": "pause_pending"}
+        return {"accepted": True, "effect": "pause_after_tick_commit",
+                "run_mode": "pause_pending", "command_scope": "world"}
 
     async def next_day(self) -> dict:
         """Advance one tick from PAUSED state. Returns control-plane status dict."""
@@ -278,9 +291,11 @@ class SimulationEngine:
                 "effect": "rejected",
                 "run_mode": self.run_mode,
                 "rejection_reason": "next_day_requires_paused_state",
+                "command_scope": "world",
             }
         self._next_day_event.set()
-        return {"accepted": True, "effect": "advance_one_tick", "run_mode": "paused"}
+        return {"accepted": True, "effect": "advance_one_tick",
+                "run_mode": "paused", "command_scope": "world"}
 
     async def submit_command(self, cmd: ControlCommand) -> CommandAck:
         async with self._intake_lock:
@@ -295,6 +310,7 @@ class SimulationEngine:
             target_tick=target_tick,
             processed_in_tick=None,
             rejection_reason=None,
+            command_scope="agent",
         )
         await self._emit("command_ack", {
             "command_id": ack.command_id,
@@ -302,27 +318,44 @@ class SimulationEngine:
             "target_tick": ack.target_tick,
             "processed_in_tick": ack.processed_in_tick,
             "rejection_reason": ack.rejection_reason,
+            "command_scope": ack.command_scope,
         })
         return ack
 
     # ------------------------------------------------------------------ config reload + world restart
 
-    async def reload_config(self) -> dict:
+    async def reload_config(self,
+                             grace_period_ms: int = 500,
+                             reconnect_after_ms: int = 2000) -> dict:
         """Re-read YAML, validate, and replace world (51-api-contract).
 
         Works from any state: cancels any in-flight continuous tick loop, drains
         a frozen intake, then re-initializes the world and resets to PAUSED at tick 0.
 
+        Per spec 51 §Config reload + spec 52 §Shutdown: reload acceptance implies
+        a graceful-restart intent. Emit `server_shutdown(reason=config_reload_restart,
+        will_restart=true)` BEFORE `world_restarting`, so any subscriber watching
+        the stream can disambiguate this restart from an unexpected close.
+
         Returns structured result dict:
         accepted, reloaded, world_generation (on success), error_codes (on validation fail),
-        rejection_reason, run_mode.
+        rejection_reason, run_mode, command_scope="world", will_restart, reconnect_after_ms.
         """
         if self.config_path is None:
             return {"accepted": False, "reloaded": False,
                     "rejection_reason": "no_config_path_registered",
-                    "run_mode": self.run_mode}
+                    "run_mode": self.run_mode,
+                    "command_scope": "world"}
 
         prev_state = self.state
+        # Restart intent notification — emit before world_restarting so clients
+        # have the will_restart hint before any lifecycle transition (spec 52).
+        await self._emit("server_shutdown", {
+            "reason": "config_reload_restart",
+            "grace_period_ms": grace_period_ms,
+            "reconnect_after_ms": reconnect_after_ms,
+            "will_restart": True,
+        })
         self.state = EngineState.RESTARTING
         next_gen = self._world_generation + 1
         await self._emit("world_restarting", {
@@ -361,6 +394,8 @@ class SimulationEngine:
                 "error_codes": [exc.code],
                 "rejection_reason": exc.message,
                 "run_mode": self.run_mode,
+                "command_scope": "world",
+                "will_restart": False,
             }
 
         # Replace world; reset transient queues; baseline is PAUSED at tick 0
@@ -415,6 +450,9 @@ class SimulationEngine:
             "reloaded": True,
             "world_generation": self._world_generation,
             "run_mode": self.run_mode,
+            "command_scope": "world",
+            "will_restart": True,
+            "reconnect_after_ms": reconnect_after_ms,
         }
 
     # ------------------------------------------------------------------ server shutdown

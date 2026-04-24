@@ -274,6 +274,58 @@ async def test_command_ack_envelope_uses_target_tick():
     assert not hasattr(ack, "effective_tick"), "effective_tick was renamed to target_tick"
 
 
+@pytest.mark.asyncio
+async def test_command_ack_envelope_includes_command_scope_agent():
+    """Spec 51 §Minimum command acknowledgement envelope: command_scope field required.
+    Gate commands (Open/CloseOnboarding etc.) must be scoped 'agent'."""
+    engine = make_engine()
+    q = engine.subscribe()
+    ack = await engine.submit_command(ControlCommand(
+        command_id="scope-test",
+        command_type="CloseOnboarding",
+        vendor_id="vendor_alpha",
+        product_id="prod_prepaid_alpha",
+    ))
+    assert ack.command_scope == "agent"
+    events = await drain_events(q)
+    ack_events = [e for e in events if e["event"] == "command_ack"]
+    assert ack_events, "expected command_ack SSE emission"
+    assert ack_events[0]["data"]["command_scope"] == "agent"
+
+
+@pytest.mark.asyncio
+async def test_control_plane_results_include_world_scope():
+    """Spec 51: control-plane actions (pause/resume/next_day/shutdown/reload)
+    return 'world' command_scope so clients can branch on scope generically."""
+    engine = make_engine()
+    # pause needs RUNNING state to do anything interesting; starting from PAUSED
+    # returns noop with world scope
+    assert (await engine.pause())["command_scope"] == "world"
+    # resume from paused -> RUNNING
+    r = await engine.resume()
+    assert r["command_scope"] == "world"
+    # next_day from RUNNING is rejected but still carries scope
+    r = await engine.next_day()
+    assert r["command_scope"] == "world"
+
+
+@pytest.mark.asyncio
+async def test_manual_shutdown_sets_will_restart_false():
+    """Spec 51/52: manual shutdown has will_restart=false unless part of declared restart flow."""
+    engine = make_engine()
+    q = engine.subscribe()
+    await engine.shutdown(reason="manual_shutdown",
+                          grace_period_ms=5,
+                          reconnect_after_ms=100,
+                          will_restart=False)
+    events = await drain_events(q)
+    shutdown_evts = [e for e in events if e["event"] == "server_shutdown"]
+    assert len(shutdown_evts) == 1
+    payload = shutdown_evts[0]["data"]
+    assert payload["will_restart"] is False
+    assert payload["reason"] == "manual_shutdown"
+
+
 # ------------------------------------------------------------------ run_mode property (51-api-contract)
 
 def test_run_mode_states():
@@ -411,6 +463,10 @@ async def test_reload_config_success_emits_lifecycle():
     assert result["reloaded"] is True
     assert result["world_generation"] == pre_gen + 1
     assert result["run_mode"] == "paused"
+    # Spec 51 §Config reload: reload acceptance implies graceful-restart intent.
+    assert result["command_scope"] == "world"
+    assert result["will_restart"] is True
+    assert "reconnect_after_ms" in result
 
     # World should be reset
     assert engine.tick_id == 0
@@ -423,6 +479,34 @@ async def test_reload_config_success_emits_lifecycle():
     restarting_idx = types.index("world_restarting")
     restarted_idx = types.index("world_restarted")
     assert restarting_idx < restarted_idx
+
+
+@pytest.mark.asyncio
+async def test_reload_emits_server_shutdown_with_restart_intent_before_world_restarting():
+    """Spec 51 §Config reload + spec 52 §Shutdown: reload must emit
+    server_shutdown(reason=config_reload_restart, will_restart=true) BEFORE
+    world_restarting so clients can disambiguate from unexpected close."""
+    engine = make_engine()
+    q = engine.subscribe()
+    await engine.reload_config()
+    events = await drain_events(q)
+
+    # Both events present
+    shutdown_evts = [e for e in events if e["event"] == "server_shutdown"]
+    restarting_evts = [e for e in events if e["event"] == "world_restarting"]
+    assert len(shutdown_evts) == 1
+    assert len(restarting_evts) == 1
+
+    # Ordering: server_shutdown comes first
+    types = [e["event"] for e in events]
+    assert types.index("server_shutdown") < types.index("world_restarting")
+
+    # Payload contract
+    payload = shutdown_evts[0]["data"]
+    assert payload["reason"] == "config_reload_restart"
+    assert payload["will_restart"] is True
+    assert isinstance(payload["grace_period_ms"], int)
+    assert isinstance(payload["reconnect_after_ms"], int)
 
 
 @pytest.mark.asyncio
