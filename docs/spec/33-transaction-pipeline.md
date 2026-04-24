@@ -95,6 +95,14 @@ These artifacts formalize the unstructured transaction-pipeline notes and are no
   - may be triggered by transaction intents or prior fee results.
   - includes deterministic trigger filters and amount basis (`count_cost`, `amount_percentage`, or declared formula mode).
   - supports explicit settlement policy, including `next_month_day_plus_x` with required `value_date_offset_days`.
+  - directionality is explicit and can flow either way between counterparties (`creditor`/`debtor` are runtime-resolved per rule outcome); example: interchange reimbursement can be payable to issuer or payable by issuer depending on net context.
+- `SettlementDemandResult` (v4 runtime)
+  - settlement claim accrual separate from fee economics.
+  - may be triggered by configured settlement-demand rules and can reverse creditor/debtor direction based on net flow.
+  - carries explicit creditor and debtor role resolution and amount basis.
+  - feeds advisement/invoice envelope with category `settlement_demand`.
+  - settlement policy/date primitives must use the same policy token family used elsewhere (`same_day`, `next_day_plus_x`, `next_working_day_plus_x`, `next_month_day_plus_x` with required offsets when `plus_x`).
+  - opposing-direction accruals (for example purchase vs refund) net naturally by directional aggregation; special formula semantics are not required for this default path.
 - `PostingEntry`
   - dual-entry accounting record with required `source` and `destination`.
   - source and destination must be role-resolved ledger references, not hardcoded product IDs or agent IDs.
@@ -168,12 +176,32 @@ These artifacts formalize the unstructured transaction-pipeline notes and are no
 
 - Minimum lifecycle states:
   - fee: `accrued`
+  - settlement demand: `accrued`
   - invoice: `invoiced`
   - settlement resolution: `paid` or `failed` (with residual when non-zero)
+- Lifecycle date fields are explicit and non-interchangeable:
+  - `accrual_date`: when fee or settlement-demand economics are recognized,
+  - `invoice_issue_date`: when advisement/invoice is emitted,
+  - `payment_due_date`: when payment is contractually due.
+- Fee contracts and settlement-demand contracts both must define explicit issue-date and due-date policy behavior.
 - Lifecycle ordering:
-  1. fee accrual at fee stage,
-  2. invoice emission on due date trigger (aggregating all fees of the same type / recipient that are due on the same date),
-  3. settlement resolution emitted after invoice handling.
+  1. fee/settlement-demand accrual at pipeline stages,
+  2. invoice/advisement emission at `invoice_issue_date` (aggregating by category, recipient, and issue date),
+  3. payment attempts up to/after `payment_due_date`,
+  4. settlement resolution emitted after payment handling.
+- Transfer-backed settlement rule:
+  - `settlement_resolution_event.final_status = paid` is valid only if corresponding value transfer execution succeeds for settled amount.
+  - If transfer fails or is partial, resolution must be non-paid with non-zero residual.
+- Cardholder fee statement rule:
+  - cardholder-facing fee disclosure should use the invoice/advisement envelope with `invoice_category=fee`, but may be marked non-payable when issuer self-serves from customer funds.
+  - non-payable cardholder statements are informational (for cost visibility) and must not require payer-side payment action.
+  - recommended status semantics: `payable=false` and settlement status `netted`/`netted_internal`.
+- Settlement-demand issuer/obligor rule:
+  - settlement demand is initiated by the issuing vendor/product, but creditor/debtor direction is determined by resolved roles.
+  - when issuer is debtor (owes funds), recipient records receivable expectation and payment execution remains the issuer/debtor responsibility.
+- Operator action binding:
+  - operator commands (`pay_now`, `hold`, `release_hold`) target underlying `invoice_id` or `settlement_demand_id`,
+  - message records are informational and do not own action execution state.
 - For prototype v4 scope, direct-payment settlement remains allowed as the default path; settlement netting remains optional/deferred unless explicitly enabled by a later spec update.
 
 ### Iteration fee sinks profile (v2 spec-only)

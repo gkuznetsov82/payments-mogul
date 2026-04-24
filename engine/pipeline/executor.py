@@ -1,29 +1,48 @@
-"""Pipeline executor — runs after v1 adjudication when pipeline_schema_version='v3_runtime'.
+"""Pipeline executor — v3_runtime / v4 semantics.
 
 Deterministic stage order per spec 30 §v3_runtime:
     intents -> fees -> postings -> asset transfers -> retention/invoice lifecycle
 
-For each successful Transact outcome whose source product has an attached
-v3_runtime pipeline profile:
-  1. For each profile.transaction_intents[].destinations[]: route an upstream
-     intent to the resolved destination product (via VendorAgent.handle_transact_from_vendor),
-     then continue at destination's pipeline.
-  2. For each fee_sequence: compute fees in order; trigger ids may reference
-     intents or earlier fees in the same sequence. Fees with deferred settlement
-     queue an open invoice for the resolved due date.
-  3. For each posting_rule: materialize a PostingEntry whose source/destination
-     ledger paths are role-expanded.
-  4. For each asset_transfer_rule: materialize an AssetTransfer with role-expanded
-     container paths.
-  5. End-of-tick: check open invoices; any with due_date == simulation_date emit
-     invoice_transaction_event + settlement_resolution_event (direct payment per
-     ADR-0002; netting deferred).
+V4 extensions (per spec 33 §Fan-out completion semantics + §Invoice and
+settlement lifecycle, gated under current `v3_runtime` schema per spec 73):
+
+1. Routing completion semantics
+   - destinations declare `routing_completion_mode` (synchronous | asynchronous;
+     default synchronous); loader enforces same_day for synchronous legs
+     (`E_SYNC_LEG_VALUE_DATE_INVALID`).
+   - synchronous legs: root-blocking; planning pre-computes `root_ok = all
+     synchronous legs can accept`. Commit only happens if root_ok; otherwise
+     destination state is left untouched and each sync leg is emitted as
+     rejected.
+   - asynchronous legs: emitted as `pending` at origin tick; enqueued for
+     resolution on/after the leg's `resolved_value_date`. Root outcome is
+     decided from synchronous legs only — async outcomes never retroactively
+     flip an already-resolved root.
+   - graph recursion: when a synchronous destination has its own profile with
+     `transaction_intents`, planning recursively evaluates that destination's
+     synchronous sub-legs; if any sub-sync-dependency fails, the parent leg is
+     treated as rejected (`SYNC_SUBDEP_FAILED`).
+
+2. Root intent emission (spec 33 §Transaction-intent log visibility)
+   - For each declared intent_cfg the source profile emits an `original_incoming`
+     event with final status computed from synchronous dependencies.
+   - Routed derivatives carry the same `root_intent_id` as the original and
+     explicit `routing_completion_mode`, `status`, and `reason_code` fields.
+
+3. Invoice + settlement lifecycle
+   - Fees with `settlement_trigger_event = invoice_transaction_event` queue
+     into an aggregation table keyed by `(fee_id, beneficiary_agent_id,
+     beneficiary_product_id, payer_agent_id, settlement_due_date, currency)`.
+   - On tick whose `simulation_date == settlement_due_date`, emit exactly one
+     `invoice_transaction_event` per aggregation group (total = sum of
+     components), then one `settlement_resolution_event` per group with final
+     status `paid` and residual 0 under the direct-payment default.
 """
 
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date as _date_t
 from typing import Callable, Optional
 
@@ -48,24 +67,89 @@ from engine.pipeline.transfers import AssetTransfer
 from engine.pipeline.value_dates import resolve_value_date
 
 
-# Sentinel for outcomes that should be skipped in pipeline routing.
 _INTENT_NS = uuid.UUID("00000000-0000-0000-0000-000000000033")  # spec 33 namespace
 
 
-@dataclass
-class _OpenInvoice:
-    """Internal record carrying enough context to emit invoice + resolution at due date."""
-    fee: FeeAccrual
-    invoice_id: str = field(default="")
+# --------------------------------------------------------------------------- internal plans
 
-    def __post_init__(self) -> None:
-        if not self.invoice_id:
-            self.invoice_id = f"inv_{self.fee.fee_id}_{self.fee.tick_id}"
+@dataclass
+class _SyncLegPlan:
+    """Planning result for a sync destination leg (pre-commit, pure)."""
+    intent: TransactionIntent
+    accepted: bool
+    reason_code: str
+
+
+@dataclass
+class _AsyncLegPlan:
+    """Pending async leg produced at origin tick; committed on resolution tick."""
+    intent: TransactionIntent
+
+
+@dataclass
+class _RootPlan:
+    """Aggregated plan for a single intent_cfg (root intent)."""
+    root_cfg_id: str
+    original_intent: TransactionIntent
+    sync_legs: list[_SyncLegPlan]
+    async_legs: list[_AsyncLegPlan]
+
+    @property
+    def root_ok(self) -> bool:
+        # Root success = all synchronous legs individually accepted AND their
+        # synchronous sub-paths all accepted (the sub-path recursion is baked
+        # into sync_legs[].accepted during _plan_sync_leg).
+        return all(leg.accepted for leg in self.sync_legs)
+
+    @property
+    def first_fail_reason(self) -> str:
+        for leg in self.sync_legs:
+            if not leg.accepted:
+                return leg.reason_code
+        return "OK"
+
+
+@dataclass
+class _PendingAsync:
+    """Async leg awaiting resolution on or after its resolved_value_date."""
+    intent: TransactionIntent
+    source_vendor_id: str
+    source_product_id: str
+
+
+@dataclass
+class _InvoiceGroup:
+    """Aggregates multiple accrued fees that share (fee_id, beneficiary, payer, due_date).
+
+    Spec 33 §Invoice and settlement lifecycle: one aggregated invoice per group
+    on the due date — not one invoice per component fee.
+    """
+    key: tuple  # (fee_id, beneficiary_agent_id, beneficiary_product_id, payer_agent_id, settlement_due_date, currency)
+    invoice_id: str
+    pipeline_profile_id: str
+    beneficiary_product_id: str
+    payer_agent_id: str
+    payer_product_id: Optional[str]
+    fee_id: str
+    settlement_due_date: _date_t
+    currency: str
+    total_amount: float = 0.0
+    component_count: int = 0
+    component_tick_ids: list[int] = field(default_factory=list)
+    earliest_tick_id: Optional[int] = None
+    earliest_date: Optional[_date_t] = None
+
+
+# --------------------------------------------------------------------------- executor
 
 
 class PipelineExecutor:
-    """Runs pipeline stages for a single tick. Stateless across ticks except for
-    the open-invoice queue (settlement is deferred across ticks)."""
+    """Runs pipeline stages for a single tick.
+
+    State retained across ticks:
+    - `_pending_async`: async legs awaiting resolution.
+    - `_invoice_groups`: aggregation table for deferred-settlement fees.
+    """
 
     def __init__(self,
                  cfg: PrototypeConfig,
@@ -77,11 +161,10 @@ class PipelineExecutor:
         self.model = model
         self.default_currency = default_currency or "USD"
         self.calendar_lookup = calendar_lookup
-        self.emit = emit  # (event_type, data) -> None
+        self.emit = emit
         self._profile_index = self._index_profiles(cfg)
-        self._open_invoices: list[_OpenInvoice] = []
-
-    # ------------------------------------------------------------------ helpers
+        self._pending_async: list[_PendingAsync] = []
+        self._invoice_groups: dict[tuple, _InvoiceGroup] = {}
 
     @staticmethod
     def _index_profiles(cfg: PrototypeConfig) -> dict[str, PipelineProfileConfig]:
@@ -93,21 +176,22 @@ class PipelineExecutor:
     def is_runtime(self) -> bool:
         return cfg_pipeline_runtime(self.cfg)
 
-    # ------------------------------------------------------------------ per-tick API
+    # ------------------------------------------------------------------ per-tick entrypoint
 
     def run_post_adjudication(self,
                               outcomes: list[ActionOutcome],
                               tick_id: int,
                               simulation_date: _date_t) -> None:
-        """Entrypoint called by SimulationEngine after v1 adjudication.
-
-        Stage order is fixed (spec 30 §v3_runtime):
-            intents -> fees -> postings -> asset transfers -> invoice/settlement.
-        """
+        """Run v3_runtime / v4 pipeline stages for a tick (spec 30 §v3_runtime)."""
         if not self.is_runtime:
             return
-        # 1. Process each successful Transact outcome from products that have a profile.
-        # Stable iteration: outcomes are appended in agent-order; sort by (vendor_id, product_id, pop_id).
+
+        # 1. Resolve async legs from prior ticks whose value date has arrived
+        # (before processing new outcomes so cross-tick resolution is observable
+        # at the top of the tick stream per spec 52 §Ordering requirement).
+        self._resolve_pending_async(tick_id, simulation_date)
+
+        # 2. Process new source outcomes (original + routed intents, source stages).
         sorted_outcomes = sorted(
             (o for o in outcomes
              if o.action_type == "Transact" and o.successful_txn_count > 0),
@@ -116,10 +200,16 @@ class PipelineExecutor:
         for o in sorted_outcomes:
             self._process_outcome(o, tick_id, simulation_date)
 
-        # 2. End-of-tick: invoice + settlement for due-today open invoices.
-        self._resolve_due_invoices(tick_id, simulation_date)
+        # 3. Same-tick async resolution: any pending async intent whose
+        # resolved_value_date == today resolves within the same tick AFTER the
+        # root already resolved (async never flips root — spec 33 v4).
+        self._resolve_pending_async(tick_id, simulation_date)
 
-    # ------------------------------------------------------------------ outcome routing
+        # 4. End-of-tick: invoice + settlement aggregation for groups whose
+        # due date has arrived.
+        self._emit_due_invoices_aggregated(tick_id, simulation_date)
+
+    # ------------------------------------------------------------------ outcome -> routing plan
 
     def _process_outcome(self,
                          outcome: ActionOutcome,
@@ -136,45 +226,36 @@ class PipelineExecutor:
             return
 
         resolver = RoleResolver(product.cfg_role_bindings)
-        # Materialize one TransactionIntent per declared destination per declared intent.
-        intents_routed: list[TransactionIntent] = []
-        for intent_cfg in sorted(profile.transaction_intents, key=lambda i: i.intent_id):
-            for dest in sorted(intent_cfg.destinations, key=lambda d: (d.destination_role, d.outgoing_intent_id)):
-                intent = self._materialize_intent(
-                    profile=profile,
-                    source_product=product,
-                    source_vendor_id=vendor.vendor_id,
-                    parent_intent_id=intent_cfg.intent_id,
-                    dest=dest,
-                    resolver=resolver,
-                    txn_count=int(round(outcome.successful_txn_count)),
-                    amount=float(outcome.successful_total_amount),
-                    tick_id=tick_id,
-                    simulation_date=simulation_date,
-                )
-                if intent is None:
-                    continue
-                intents_routed.append(intent)
-                self._emit_intent(intent)
-                # Hand off to destination product.
-                self._dispatch_handoff(intent)
+        txn_count = int(round(outcome.successful_txn_count))
+        amount = float(outcome.successful_total_amount)
 
-        # Trigger pool for fee/posting/transfer rules: parent intent_id from this profile,
-        # any outgoing_intent_id from routed intents.
+        # Local trigger pool for source-profile stages. Only successfully-rooted
+        # intents contribute (spec 33 v4 §Root intent success-gating).
         local_trigger_amounts: dict[str, tuple[int, float]] = {}
-        for intent_cfg in profile.transaction_intents:
-            # The "parent" intent itself is also a usable trigger id for fees/postings
-            # in the source product's profile (spec 33: intents drive fees + postings).
-            local_trigger_amounts[intent_cfg.intent_id] = (
-                int(round(outcome.successful_txn_count)),
-                float(outcome.successful_total_amount),
-            )
-        for intent in intents_routed:
-            local_trigger_amounts[intent.intent_id] = (intent.txn_count, intent.amount)
 
-        # 2-4. Run fees / postings / asset transfers anchored on the SOURCE product's
-        # profile against the local trigger pool. Destination product runs its own
-        # profile via _run_profile_stages from the handoff path.
+        for root_cfg in sorted(profile.transaction_intents, key=lambda i: i.intent_id):
+            plan = self._plan_root(
+                root_cfg=root_cfg,
+                profile=profile,
+                source_product=product,
+                source_vendor_id=vendor.vendor_id,
+                resolver=resolver,
+                txn_count=txn_count,
+                amount=amount,
+                tick_id=tick_id,
+                simulation_date=simulation_date,
+            )
+            self._commit_root(plan)
+            if plan.root_ok:
+                local_trigger_amounts[root_cfg.intent_id] = (txn_count, amount)
+                for leg in plan.sync_legs:
+                    if leg.accepted:
+                        local_trigger_amounts[leg.intent.intent_id] = (
+                            leg.intent.txn_count, leg.intent.amount
+                        )
+
+        # Source profile stages — fees / postings / transfers anchored on the
+        # accumulated trigger pool (roots that resolved OK only).
         self._run_profile_stages(
             profile=profile,
             owning_product=product,
@@ -185,12 +266,177 @@ class PipelineExecutor:
             trigger_amounts=local_trigger_amounts,
         )
 
-    # ------------------------------------------------------------------ destination handoff
+    # ------------------------------------------------------------------ root planning (recursive)
 
-    def _dispatch_handoff(self, intent: TransactionIntent) -> None:
+    def _plan_root(self,
+                   root_cfg,
+                   profile: PipelineProfileConfig,
+                   source_product: GenericProduct,
+                   source_vendor_id: str,
+                   resolver: RoleResolver,
+                   txn_count: int,
+                   amount: float,
+                   tick_id: int,
+                   simulation_date: _date_t) -> _RootPlan:
+        original = self._materialize_original_intent(
+            profile=profile,
+            source_product=source_product,
+            intent_cfg_id=root_cfg.intent_id,
+            txn_count=txn_count,
+            amount=amount,
+            tick_id=tick_id,
+            simulation_date=simulation_date,
+        )
+        sync_legs: list[_SyncLegPlan] = []
+        async_legs: list[_AsyncLegPlan] = []
+        for dest in sorted(root_cfg.destinations,
+                           key=lambda d: (d.destination_role, d.outgoing_intent_id)):
+            intent = self._materialize_intent(
+                profile=profile,
+                source_product=source_product,
+                source_vendor_id=source_vendor_id,
+                parent_intent_id=root_cfg.intent_id,
+                root_intent_id=root_cfg.intent_id,
+                dest=dest,
+                resolver=resolver,
+                txn_count=txn_count,
+                amount=amount,
+                tick_id=tick_id,
+                simulation_date=simulation_date,
+            )
+            if intent is None:
+                continue
+            if dest.routing_completion_mode == "synchronous":
+                accepted, reason = self._plan_sync_leg(intent)
+                sync_legs.append(_SyncLegPlan(intent=intent, accepted=accepted, reason_code=reason))
+            else:
+                async_legs.append(_AsyncLegPlan(intent=intent))
+        return _RootPlan(
+            root_cfg_id=root_cfg.intent_id,
+            original_intent=original,
+            sync_legs=sync_legs,
+            async_legs=async_legs,
+        )
+
+    def _plan_sync_leg(self, intent: TransactionIntent) -> tuple[bool, str]:
+        """Dry-run acceptance for a sync leg, recursing through destination sync sub-legs.
+
+        Spec 33 v4: "synchronous dependency evaluation is graph-recursive (whole
+        synchronous path must succeed)". Returns (accepted, reason_code).
+        """
+        accepted, reason = self._peek_destination_acceptance(intent)
+        if not accepted:
+            return False, reason
+        dest_product, dest_profile = self._destination_context(intent)
+        if dest_product is None or dest_profile is None:
+            # Destination accepted upstream but has no profile — no sub-deps.
+            return True, "OK_UPSTREAM"
+        # Recurse on destination's sync-outgoing legs (if any). Async sub-legs
+        # never block the parent leg's outcome.
+        for sub_cfg in sorted(dest_profile.transaction_intents, key=lambda i: i.intent_id):
+            for sub_dest in sorted(sub_cfg.destinations,
+                                   key=lambda d: (d.destination_role, d.outgoing_intent_id)):
+                if sub_dest.routing_completion_mode != "synchronous":
+                    continue
+                sub_resolver = RoleResolver(dest_product.cfg_role_bindings)
+                sub_intent = self._materialize_intent(
+                    profile=dest_profile,
+                    source_product=dest_product,
+                    source_vendor_id=intent.destination_vendor_id,
+                    parent_intent_id=sub_cfg.intent_id,
+                    root_intent_id=sub_cfg.intent_id,
+                    dest=sub_dest,
+                    resolver=sub_resolver,
+                    txn_count=intent.txn_count,
+                    amount=intent.amount,
+                    tick_id=intent.tick_id,
+                    simulation_date=intent.simulation_date,
+                )
+                if sub_intent is None:
+                    continue
+                sub_ok, sub_reason = self._plan_sync_leg(sub_intent)
+                if not sub_ok:
+                    return False, f"SYNC_SUBDEP_FAILED:{sub_reason}"
+        return True, "OK_UPSTREAM"
+
+    def _peek_destination_acceptance(self, intent: TransactionIntent) -> tuple[bool, str]:
+        """Evaluate destination gate *without* mutating state.
+
+        Mirrors the checks in `VendorAgent.handle_transact_from_vendor` /
+        `Product.transact_product_from_upstream` so the plan phase can decide
+        root success without committing destination counters until the plan is
+        approved.
+        """
+        dest_vendor = self.model.vendors.get(intent.destination_vendor_id)
+        if dest_vendor is None:
+            return False, "DESTINATION_VENDOR_NOT_FOUND"
+        if not dest_vendor.operational:
+            return False, "VENDOR_NOT_OPERATIONAL"
+        dest_product = dest_vendor.products.get(intent.destination_product_id)
+        if dest_product is None:
+            return False, "PRODUCT_NOT_FOUND"
+        if not dest_product.accepting_transact:
+            return False, "TRANSACT_CLOSED"
+        return True, "OK_UPSTREAM"
+
+    def _destination_context(self,
+                              intent: TransactionIntent) -> tuple[Optional[GenericProduct], Optional[PipelineProfileConfig]]:
+        dest_vendor = self.model.vendors.get(intent.destination_vendor_id)
+        if dest_vendor is None:
+            return None, None
+        dest_product = dest_vendor.products.get(intent.destination_product_id)
+        if dest_product is None:
+            return None, None
+        if dest_product.cfg_profile_id is None:
+            return dest_product, None
+        return dest_product, self._profile_index.get(dest_product.cfg_profile_id)
+
+    # ------------------------------------------------------------------ commit phase
+
+    def _commit_root(self, plan: _RootPlan) -> None:
+        """Emit original + routed events and run destination-side stages for
+        each accepted sync leg when root_ok. Always schedule async legs."""
+        root_ok = plan.root_ok
+        orig_status = "executed" if root_ok else "rejected"
+        orig_reason = "OK" if root_ok else plan.first_fail_reason
+        original = replace(plan.original_intent, status=orig_status, reason_code=orig_reason)
+        self._emit_intent(original)
+
+        for leg in plan.sync_legs:
+            if root_ok and leg.accepted:
+                # Commit destination handoff + run destination stages (which
+                # may recursively trigger destination's own routing + stages).
+                self._commit_sync_leg(leg.intent)
+                self._emit_intent(replace(leg.intent, status="executed",
+                                           reason_code=leg.reason_code))
+            else:
+                # Root failed (possibly because of a sibling); this leg is
+                # rejected at the observability layer. No destination state
+                # mutation (state stays intact because we used peek).
+                if leg.accepted and not root_ok:
+                    reason = "SIBLING_SYNC_LEG_FAILED"
+                else:
+                    reason = leg.reason_code
+                self._emit_intent(replace(leg.intent, status="rejected",
+                                           reason_code=reason))
+
+        for leg in plan.async_legs:
+            # Emit pending at origin tick + enqueue for resolution.
+            pending = replace(leg.intent, status="pending", reason_code="OK")
+            self._emit_intent(pending)
+            source_vendor_id = _vendor_of_product(self.model, leg.intent.source_product_id) or ""
+            self._pending_async.append(_PendingAsync(
+                intent=leg.intent,
+                source_vendor_id=source_vendor_id,
+                source_product_id=leg.intent.source_product_id,
+            ))
+
+    def _commit_sync_leg(self, intent: TransactionIntent) -> None:
+        """Commit the destination Transact() call + run destination profile stages."""
         dest_vendor = self.model.vendors.get(intent.destination_vendor_id)
         if dest_vendor is None:
             return
+        source_vendor_id = _vendor_of_product(self.model, intent.source_product_id) or ""
         details = TransactionDetails(
             intent_id=intent.intent_id,
             parent_intent_id=intent.parent_intent_id,
@@ -201,34 +447,84 @@ class PipelineExecutor:
             value_date_offset_days=intent.value_date_offset_days,
         )
         dest_vendor.handle_transact_from_vendor(
-            client_id=intent.source_product_id and getattr(self.model.vendors.get(
-                _vendor_of_product(self.model, intent.source_product_id)), "vendor_id", "")
-            or "",
+            client_id=source_vendor_id,
             product_id=intent.destination_product_id,
             details=details,
         )
-        # Run destination product's profile against this routed intent (its outgoing
-        # intent id becomes a trigger inside the destination profile).
-        dest_product = dest_vendor.products.get(intent.destination_product_id)
-        if dest_product is None or dest_product.cfg_profile_id is None:
-            return
-        dest_profile = self._profile_index.get(dest_product.cfg_profile_id)
-        if dest_profile is None:
+        self._run_destination_stages(intent)
+
+    def _run_destination_stages(self, intent: TransactionIntent) -> None:
+        dest_product, dest_profile = self._destination_context(intent)
+        if dest_product is None or dest_profile is None:
             return
         dest_resolver = RoleResolver(dest_product.cfg_role_bindings)
-        # Trigger pool at destination: the routed intent_id.
-        dest_triggers = {intent.intent_id: (intent.txn_count, intent.amount)}
+        dest_triggers: dict[str, tuple[int, float]] = {
+            intent.intent_id: (intent.txn_count, intent.amount),
+        }
         self._run_profile_stages(
             profile=dest_profile,
             owning_product=dest_product,
-            owning_vendor_id=dest_vendor.vendor_id,
+            owning_vendor_id=intent.destination_vendor_id,
             resolver=dest_resolver,
             tick_id=intent.tick_id,
             simulation_date=intent.simulation_date,
             trigger_amounts=dest_triggers,
         )
 
-    # ------------------------------------------------------------------ profile stages
+    # ------------------------------------------------------------------ async resolution
+
+    def _resolve_pending_async(self,
+                                tick_id: int,
+                                simulation_date: _date_t) -> None:
+        """Resolve pending async legs whose resolved_value_date <= simulation_date.
+
+        Spec 52 §Ordering requirement (async): resolution tick emits routed
+        intent as executed or rejected; destination stages follow if executed.
+        Preserves `intent_id` + `root_intent_id` from origin tick for
+        correlation continuity (spec 33 v4 §Correlation requirements).
+        """
+        if not self._pending_async:
+            return
+        still_pending: list[_PendingAsync] = []
+        # Deterministic order: by (resolved_value_date, root_intent_id, intent_id,
+        # destination_product_id) so replays emit identical streams.
+        due_now: list[_PendingAsync] = []
+        for p in self._pending_async:
+            if p.intent.resolved_value_date <= simulation_date:
+                due_now.append(p)
+            else:
+                still_pending.append(p)
+        due_now.sort(key=lambda p: (p.intent.resolved_value_date,
+                                     p.intent.root_intent_id,
+                                     p.intent.intent_id,
+                                     p.intent.destination_product_id))
+        self._pending_async = still_pending
+        for p in due_now:
+            # Re-check destination gate at resolution time.
+            accepted, reason = self._peek_destination_acceptance(p.intent)
+            if accepted:
+                # Commit handoff with updated tick_id / simulation_date so
+                # destination stages carry resolution-tick context.
+                resolved_intent = replace(
+                    p.intent,
+                    tick_id=tick_id,
+                    simulation_date=simulation_date,
+                    status="executed",
+                    reason_code="OK_UPSTREAM",
+                )
+                self._emit_intent(resolved_intent)
+                self._commit_sync_leg(resolved_intent)
+            else:
+                rejected_intent = replace(
+                    p.intent,
+                    tick_id=tick_id,
+                    simulation_date=simulation_date,
+                    status="rejected",
+                    reason_code=reason,
+                )
+                self._emit_intent(rejected_intent)
+
+    # ------------------------------------------------------------------ destination / source stages
 
     def _run_profile_stages(self,
                             profile: PipelineProfileConfig,
@@ -238,13 +534,11 @@ class PipelineExecutor:
                             tick_id: int,
                             simulation_date: _date_t,
                             trigger_amounts: dict[str, tuple[int, float]]) -> None:
-        """Stages 2-4 against the given trigger pool."""
+        """Stages 2-4 of v3_runtime (fees / postings / transfers)."""
         cal = self._calendar_for_vendor(owning_vendor_id)
-        # 2. Fees in declared sequence/fee order (deterministic).
         fee_amounts: dict[str, tuple[int, float]] = {}
         for seq in profile.fee_sequences:
             for fee_cfg in seq.fees:
-                # Aggregate across all matched triggers.
                 total_count = 0
                 total_basis = 0.0
                 for tid in fee_cfg.trigger_ids:
@@ -275,21 +569,19 @@ class PipelineExecutor:
                     continue
                 fee_amounts[fee_cfg.fee_id] = (total_count, fee.fee_amount)
                 self._emit_fee(fee)
-                # If deferred settlement, queue invoice.
+                # Deferred-settlement fees fold into the aggregation table.
                 if fee.settlement_trigger_event == "invoice_transaction_event":
-                    self._open_invoices.append(_OpenInvoice(fee=fee))
+                    self._queue_invoice_component(fee)
 
-        # 3. Postings.
         for rule in profile.posting_rules:
-            self._maybe_post(rule, profile, owning_product, resolver, tick_id, simulation_date,
-                             trigger_amounts, fee_amounts, cal)
+            self._maybe_post(rule, profile, owning_product, resolver, tick_id,
+                             simulation_date, trigger_amounts, fee_amounts, cal)
 
-        # 4. Asset transfers.
         for rule in profile.asset_transfer_rules:
-            self._maybe_transfer(rule, profile, owning_product, resolver, tick_id, simulation_date,
-                                 trigger_amounts, fee_amounts, cal)
+            self._maybe_transfer(rule, profile, owning_product, resolver, tick_id,
+                                 simulation_date, trigger_amounts, fee_amounts, cal)
 
-    # ------------------------------------------------------------------ fee computation
+    # ------------------------------------------------------------------ fee / posting / transfer
 
     def _compute_fee(self,
                      fee_cfg: FeeConfig,
@@ -324,6 +616,16 @@ class PipelineExecutor:
             except RoleResolutionError:
                 pass
 
+        # Resolve payer role if bound (enables invoice aggregation by payer).
+        payer_agent_id: Optional[str] = None
+        payer_product_id: Optional[str] = None
+        try:
+            payer_resolved = resolver.resolve("payer_role")
+            payer_agent_id = payer_resolved.agent_id
+            payer_product_id = payer_resolved.product_id
+        except RoleResolutionError:
+            pass
+
         currency = (fee_cfg.count_cost.currency if fee_cfg.count_cost else self.default_currency)
         try:
             due = resolve_value_date(
@@ -346,8 +648,8 @@ class PipelineExecutor:
             beneficiary_role=fee_cfg.beneficiary_role,
             beneficiary_agent_id=beneficiary.agent_id or owning_vendor_id,
             beneficiary_product_id=beneficiary_product_id or owning_product.product_id,
-            payer_role=None,
-            payer_agent_id=None,
+            payer_role="payer_role" if payer_agent_id else None,
+            payer_agent_id=payer_agent_id,
             txn_count_basis=int(txn_count),
             amount_basis=round_amount(amount_basis, sim.amount_scale_dp, sim.amount_rounding_mode),
             fixed_component=round_amount(fixed, sim.amount_scale_dp, sim.amount_rounding_mode),
@@ -360,8 +662,6 @@ class PipelineExecutor:
             settlement_trigger_event=fee_cfg.settlement_trigger_event,
             status="accrued",
         )
-
-    # ------------------------------------------------------------------ posting / transfer
 
     def _maybe_post(self,
                     rule: PostingRuleConfig,
@@ -462,64 +762,144 @@ class PipelineExecutor:
             if trigger_id in fee_amounts:
                 return fee_amounts[trigger_id][1]
             return None
-        # default: transaction_intent_amount
         if trigger_id in trigger_amounts:
             return trigger_amounts[trigger_id][1]
         if trigger_id in fee_amounts:
             return fee_amounts[trigger_id][1]
         return None
 
-    # ------------------------------------------------------------------ invoice resolution
+    # ------------------------------------------------------------------ invoice aggregation (v4)
 
-    def _resolve_due_invoices(self, tick_id: int, simulation_date: _date_t) -> None:
-        """Emit invoice + direct-payment settlement for each open invoice whose
-        due_date == today. Per ADR-0002 netting is out of scope; mode='paid'."""
-        still_open: list[_OpenInvoice] = []
-        for inv in self._open_invoices:
-            if inv.fee.settlement_due_date == simulation_date:
-                event = InvoiceEvent(
-                    invoice_id=inv.invoice_id,
-                    tick_id=tick_id,
-                    simulation_date=simulation_date,
-                    pipeline_profile_id=inv.fee.pipeline_profile_id,
-                    beneficiary_product_id=inv.fee.beneficiary_product_id or inv.fee.product_id,
-                    payer_agent_id=inv.fee.payer_agent_id or "",
-                    payer_product_id=inv.fee.payer_product_id if hasattr(inv.fee, "payer_product_id") else None,
-                    fee_id=inv.fee.fee_id,
-                    accrual_tick_id=inv.fee.tick_id,
-                    accrual_date=inv.fee.simulation_date,
-                    amount=inv.fee.fee_amount,
-                    currency=inv.fee.currency,
-                    status="invoiced",
-                )
-                self._emit_invoice(event)
-                resolution = SettlementResolution(
-                    invoice_id=inv.invoice_id,
-                    tick_id=tick_id,
-                    simulation_date=simulation_date,
-                    pipeline_profile_id=inv.fee.pipeline_profile_id,
-                    beneficiary_product_id=event.beneficiary_product_id,
-                    payer_agent_id=event.payer_agent_id,
-                    payer_product_id=event.payer_product_id,
-                    fee_id=event.fee_id,
-                    settled_amount=event.amount,
-                    residual_amount=0.0,
-                    currency=event.currency,
-                    mode="paid",
-                    final_status="paid",
-                )
-                self._emit_settlement(resolution)
-            else:
-                still_open.append(inv)
-        self._open_invoices = still_open
+    def _queue_invoice_component(self, fee: FeeAccrual) -> None:
+        """Fold an accrued fee into its aggregation group (spec 33 §Invoice aggregation)."""
+        key = (
+            fee.fee_id,
+            fee.beneficiary_agent_id,
+            fee.beneficiary_product_id or "",
+            fee.payer_agent_id or "",
+            fee.settlement_due_date.isoformat(),
+            fee.currency,
+        )
+        group = self._invoice_groups.get(key)
+        if group is None:
+            # Deterministic invoice_id built from the group key so replays match.
+            invoice_id = (
+                f"inv_{fee.fee_id}_"
+                f"{fee.settlement_due_date.isoformat()}_"
+                f"{fee.beneficiary_product_id or fee.beneficiary_agent_id or 'self'}_"
+                f"{fee.payer_agent_id or 'self'}"
+            )
+            group = _InvoiceGroup(
+                key=key,
+                invoice_id=invoice_id,
+                pipeline_profile_id=fee.pipeline_profile_id,
+                beneficiary_product_id=fee.beneficiary_product_id or fee.product_id,
+                payer_agent_id=fee.payer_agent_id or "",
+                payer_product_id=None,
+                fee_id=fee.fee_id,
+                settlement_due_date=fee.settlement_due_date,
+                currency=fee.currency,
+            )
+            self._invoice_groups[key] = group
+        sim = self.cfg.simulation
+        group.total_amount = round_amount(
+            group.total_amount + float(fee.fee_amount),
+            sim.amount_scale_dp,
+            sim.amount_rounding_mode,
+        )
+        group.component_count += 1
+        group.component_tick_ids.append(fee.tick_id)
+        if group.earliest_tick_id is None or fee.tick_id < group.earliest_tick_id:
+            group.earliest_tick_id = fee.tick_id
+            group.earliest_date = fee.simulation_date
 
-    # ------------------------------------------------------------------ intent helpers
+    def _emit_due_invoices_aggregated(self,
+                                       tick_id: int,
+                                       simulation_date: _date_t) -> None:
+        """Emit one aggregate invoice + one settlement per due group (spec 33 v4)."""
+        if not self._invoice_groups:
+            return
+        # Deterministic emission order: sorted by key.
+        due_keys = sorted(k for k, g in self._invoice_groups.items()
+                          if g.settlement_due_date == simulation_date)
+        for key in due_keys:
+            group = self._invoice_groups.pop(key)
+            invoice = InvoiceEvent(
+                invoice_id=group.invoice_id,
+                tick_id=tick_id,
+                simulation_date=simulation_date,
+                pipeline_profile_id=group.pipeline_profile_id,
+                beneficiary_product_id=group.beneficiary_product_id,
+                payer_agent_id=group.payer_agent_id,
+                payer_product_id=group.payer_product_id,
+                fee_id=group.fee_id,
+                accrual_tick_id=group.earliest_tick_id or tick_id,
+                accrual_date=group.earliest_date or simulation_date,
+                amount=group.total_amount,
+                currency=group.currency,
+                status="invoiced",
+                component_count=group.component_count,
+                component_tick_ids=tuple(sorted(group.component_tick_ids)),
+            )
+            self._emit_invoice(invoice)
+            # Direct-payment settlement (ADR-0002 netting deferred).
+            resolution = SettlementResolution(
+                invoice_id=invoice.invoice_id,
+                tick_id=tick_id,
+                simulation_date=simulation_date,
+                pipeline_profile_id=invoice.pipeline_profile_id,
+                beneficiary_product_id=invoice.beneficiary_product_id,
+                payer_agent_id=invoice.payer_agent_id,
+                payer_product_id=invoice.payer_product_id,
+                fee_id=invoice.fee_id,
+                settled_amount=invoice.amount,
+                residual_amount=0.0,
+                currency=invoice.currency,
+                mode="paid",
+                final_status="paid",
+            )
+            self._emit_settlement(resolution)
+
+    # ------------------------------------------------------------------ intent materialization
+
+    def _materialize_original_intent(self,
+                                     profile: PipelineProfileConfig,
+                                     source_product: GenericProduct,
+                                     intent_cfg_id: str,
+                                     txn_count: int,
+                                     amount: float,
+                                     tick_id: int,
+                                     simulation_date: _date_t) -> TransactionIntent:
+        sim = self.cfg.simulation
+        return TransactionIntent(
+            intent_id=intent_cfg_id,
+            parent_intent_id=None,
+            tick_id=tick_id,
+            simulation_date=simulation_date,
+            pipeline_profile_id=profile.pipeline_profile_id,
+            source_product_id=source_product.product_id,
+            destination_role="",
+            destination_product_id="",
+            destination_vendor_id="",
+            txn_count=int(txn_count),
+            amount=round_amount(amount, sim.amount_scale_dp, sim.amount_rounding_mode),
+            currency=self.default_currency,
+            value_date_policy="same_day",
+            value_date_offset_days=0,
+            resolved_value_date=simulation_date,
+            intent_stage="original_incoming",
+            root_intent_id=intent_cfg_id,
+            routing_completion_mode="",
+            status="executed",
+            reason_code="OK",
+        )
 
     def _materialize_intent(self,
                             profile: PipelineProfileConfig,
                             source_product: GenericProduct,
                             source_vendor_id: str,
                             parent_intent_id: str,
+                            root_intent_id: str,
                             dest: TransactionDestinationConfig,
                             resolver: RoleResolver,
                             txn_count: int,
@@ -531,8 +911,7 @@ class PipelineExecutor:
         except RoleResolutionError:
             return None
         if resolved.local:
-            return None  # local sink — no inter-product handoff
-        # Determine destination vendor + product.
+            return None
         dest_product_id = resolved.product_id
         dest_vendor_id = resolved.agent_id
         if dest_product_id is None and dest_vendor_id is not None:
@@ -566,10 +945,14 @@ class PipelineExecutor:
             value_date_policy=dest.value_date_policy,
             value_date_offset_days=dest.value_date_offset_days,
             resolved_value_date=v_date,
+            intent_stage="routed_outgoing",
+            root_intent_id=root_intent_id,
+            routing_completion_mode=dest.routing_completion_mode,
+            status="pending",  # overwritten in _commit_root
+            reason_code="",
         )
 
     def _calendar_for_vendor(self, vendor_id: str) -> Optional[Calendar]:
-        # Vendor's region_id determines the calendar; lookup helper is provided by engine.
         try:
             return self.calendar_lookup(vendor_id)
         except Exception:
@@ -578,13 +961,15 @@ class PipelineExecutor:
     # ------------------------------------------------------------------ emit shims
 
     def _emit_intent(self, i: TransactionIntent) -> None:
-        self.emit("transaction_intent_event", {
+        payload = {
             "tick_id": i.tick_id,
             "simulation_date": i.simulation_date.isoformat(),
             "pipeline_profile_id": i.pipeline_profile_id,
             "product_id": i.source_product_id,
             "intent_id": i.intent_id,
             "parent_intent_id": i.parent_intent_id,
+            "intent_stage": i.intent_stage,
+            "root_intent_id": i.root_intent_id or i.intent_id,
             "destination_role": i.destination_role,
             "destination_product_id": i.destination_product_id,
             "destination_vendor_id": i.destination_vendor_id,
@@ -592,7 +977,13 @@ class PipelineExecutor:
             "amount": {"amount": f"{i.amount:.2f}", "currency": i.currency},
             "value_date_policy": i.value_date_policy,
             "resolved_value_date": i.resolved_value_date.isoformat(),
-        })
+            "status": i.status,
+            "reason_code": i.reason_code,
+        }
+        # `routing_completion_mode` only meaningful on routed_outgoing legs.
+        if i.intent_stage == "routed_outgoing":
+            payload["routing_completion_mode"] = i.routing_completion_mode
+        self.emit("transaction_intent_event", payload)
 
     def _emit_fee(self, f: FeeAccrual) -> None:
         self.emit("fee_accrual_event", {
@@ -666,6 +1057,9 @@ class PipelineExecutor:
             "payer_product_id": i.payer_product_id,
             "amount": {"amount": f"{i.amount:.2f}", "currency": i.currency},
             "status": i.status,
+            # v4 aggregation transparency.
+            "component_count": i.component_count,
+            "component_tick_ids": list(i.component_tick_ids),
         })
 
     def _emit_settlement(self, r: SettlementResolution) -> None:

@@ -511,6 +511,9 @@ _VALUE_DATE_POLICIES = (
 )
 _PIPELINE_SCHEMA_VERSIONS = ("v2_foundations", "v3_runtime")
 _CURRENCY_MODES = ("inherit", "fixed_currency", "fx_convert")
+# Spec 33 §Fan-out completion semantics + spec 40 §Routing completion mode.
+# Default is `synchronous` when omitted.
+_ROUTING_COMPLETION_MODES = ("synchronous", "asynchronous")
 
 
 def _check_offset_for_policy(policy: str, offset: Optional[int], field_label: str) -> None:
@@ -545,6 +548,11 @@ class TransactionDestinationConfig(BaseModel):
     value_date_offset_days: Optional[int] = None
     amount_basis: str = "transaction_intent_amount"
     currency_mode: str = "inherit"
+    # Spec 40 §Routing completion mode (v4 semantics): default synchronous when
+    # omitted. Synchronous legs block root success within the current tick;
+    # asynchronous legs are pending on origin tick and resolve on/after value date
+    # (spec 33 §Fan-out completion semantics).
+    routing_completion_mode: str = "synchronous"
 
     @field_validator("value_date_policy")
     @classmethod
@@ -564,10 +572,31 @@ class TransactionDestinationConfig(BaseModel):
             )
         return v
 
+    @field_validator("routing_completion_mode")
+    @classmethod
+    def known_routing_mode(cls, v: str) -> str:
+        if v not in _ROUTING_COMPLETION_MODES:
+            raise ValueError(
+                f"E_ROUTING_COMPLETION_MODE_INVALID: must be one of "
+                f"{_ROUTING_COMPLETION_MODES}, got '{v}'"
+            )
+        return v
+
     @model_validator(mode="after")
     def offset_required_for_plus_x(self) -> "TransactionDestinationConfig":
         _check_offset_for_policy(self.value_date_policy, self.value_date_offset_days,
                                   "destination.value_date_offset_days")
+        # Spec 33 §Fan-out completion semantics: synchronous legs MUST resolve
+        # within the current tick execution boundary. Any non-same_day policy
+        # implies a deferred resolution, which is invalid for a synchronous leg
+        # and must fail config load.
+        if (self.routing_completion_mode == "synchronous"
+                and self.value_date_policy != "same_day"):
+            raise ValueError(
+                f"E_SYNC_LEG_VALUE_DATE_INVALID: synchronous destinations must use "
+                f"value_date_policy='same_day' (got '{self.value_date_policy}'); "
+                f"deferred resolution is only allowed for routing_completion_mode='asynchronous'"
+            )
         return self
 
 

@@ -363,8 +363,13 @@ This section formalizes transaction-pipeline config contracts. Binding depends o
   - `fees` (`array[object]`)
     - `fee_id` (`string`)
     - `trigger_ids` (`array[string]`) - transaction intent IDs and/or prior fee IDs
-    - `beneficiary_role` (`string`) - role of fee beneficiary agent
+    - `beneficiary_role` (`string`) - role of fee beneficiary agent (creditor side)
+    - optional `payer_role` (`string`) - role of fee payer agent (debtor side) when direction must be explicit
     - optional `beneficiary_product_role` (`string`) - role of beneficiary product when beneficiary has more than one product and target product must be unambiguous
+    - `invoice_issue_date_policy` (`string`) - invoice/advisement issue-date policy token
+    - `invoice_issue_date_offset_days` (`integer`, `>= 0`) - required when issue-date policy contains `plus_x`
+    - `payment_due_date_policy` (`string`) - payment due-date policy token
+    - `payment_due_date_offset_days` (`integer`, `>= 0`) - required when due-date policy contains `plus_x`
     - `settlement_value_date_policy` (`string`) - same allowed set as `value_date_policy`
     - `settlement_value_date_offset_days` (`integer`, `>= 0`) - required when settlement policy contains `plus_x`
     - `settlement_trigger_event` (`string`) - `invoice_transaction_event` for deferred fee collection
@@ -373,6 +378,33 @@ This section formalizes transaction-pipeline config contracts. Binding depends o
       - `count_cost`
       - `amount_percentage`
       - `formula_ref`
+    - directionality rule:
+      - fee can resolve either direction between counterparties; resolved creditor/debtor must be emitted in accrual/realtime outputs
+      - negative net formulations are allowed only when explicitly supported by fee formula contract and must still resolve to explicit creditor/debtor roles
+  - `settlement_demand_sequences` (`array[object]`) - ordered settlement-demand accrual execution:
+  - `sequence_id` (`string`)
+  - `settlement_demands` (`array[object]`)
+    - `settlement_demand_id` (`string`)
+    - `trigger_ids` (`array[string]`) - transaction intent IDs and/or prior settlement-demand IDs
+    - `creditor_role` (`string`)
+    - `debtor_role` (`string`)
+    - `invoice_category` (`string`) - must be `settlement_demand`
+    - `invoice_issue_date_policy` (`string`) - issue-date policy token
+    - `invoice_issue_date_offset_days` (`integer`, `>= 0`) - required when issue-date policy contains `plus_x`
+    - `payment_due_date_policy` (`string`) - due-date policy token
+    - `payment_due_date_offset_days` (`integer`, `>= 0`) - required when due-date policy contains `plus_x`
+    - one or more amount drivers:
+      - `amount_percentage`
+      - `formula_ref`
+    - settlement policy/date primitives:
+      - must use the same policy token family and `plus_x` offset rules used by intents/fees/postings/transfers
+  - `settlement_payment_policies` (`array[object]`) - payer-side payment execution controls:
+    - `applies_to_category` (`string`) - `fee` or `settlement_demand`
+    - `source_container_ref` (`string`) - payer-side payment source container
+    - optional `auto_pay_enabled` (`boolean`)
+    - optional `hold_default` (`boolean`)
+    - optional `grace_ticks` (`integer`, `>= 0`)
+    - optional `non_payable_statement` (`boolean`) - when true, advisement is informational only and excluded from payment action queues
   - `ledger_value_container_map` (`array[object]`) - reconciliation mapping:
   - `ledger_ref` (`string`) - reference to `ledger_construction[].ledger_ref`
   - `container_ref` (`string`) - reference to `value_container_construction[].container_ref`
@@ -386,6 +418,12 @@ This section formalizes transaction-pipeline config contracts. Binding depends o
   - beneficiary agent has multiple products, or
   - product-specific fee contracts differ within the same beneficiary agent.
 - It may be omitted only when beneficiary product is unambiguous from role bindings.
+
+#### Intent of `payer_role` for fee directionality
+
+- `payer_role` is optional for simple one-direction fee contracts where debtor is implied.
+- `payer_role` should be explicit for bilateral fee contracts where direction can flip by scenario context (for example interchange reimbursement).
+- Runtime outputs must still emit resolved creditor/debtor identities even when `payer_role` is implicit.
 
 #### Product-level role resolution (required for pipeline role references)
 
@@ -426,6 +464,16 @@ When a transaction intent routes from Product A to Product B:
     - downstream destination stages execute only after successful async resolution.
 - Authoring default is `synchronous`; explicit declaration is strongly recommended for every destination in v4-targeted configs.
 
+#### Lifecycle date semantics (required)
+
+- Invoice-capable artifacts must carry explicit and separate date fields:
+  - `accrual_date`,
+  - `invoice_issue_date`,
+  - `payment_due_date`.
+- Aggregation keys for emitted advisements/invoices must use `invoice_issue_date` (not `payment_due_date`).
+- Overdue and late-payment semantics must use `payment_due_date`.
+- Fee contracts and settlement-demand contracts both must provide explicit issue/due date policy configuration.
+
 #### Value-date offset rules (required)
 
 - If `value_date_policy` or `settlement_value_date_policy` contains `plus_x`, corresponding offset field is mandatory:
@@ -434,6 +482,19 @@ When a transaction intent routes from Product A to Product B:
 - For `same_day`, offset should be omitted or set to `0`.
 - For this iteration's sink-fee contracts (scheme and processor), settlement policy is `next_month_day_plus_x` with offset `5`.
 - For sink-fee settlement in this iteration, `settlement_trigger_event` must be `invoice_transaction_event` and collection uses direct payment after invoice issuance.
+
+#### Payment action binding and validation expectations
+
+- Operator actions (`pay_now`, `hold`, `release_hold`) must target underlying `invoice_id` / `settlement_demand_id`.
+- Message records are informational and must not be treated as action targets.
+- Missing payer-side container mapping for payable invoice/demand must keep item in unpaid queue and emit operator-visible warning/critical message.
+- Non-payable statements (`non_payable_statement=true`) must not enter payable queues and must not expose payment actions.
+
+#### Refund/purchase netting direction rule (required default)
+
+- Opposing-direction settlement-demand accruals (for example purchase settlement vs refund settlement) should net naturally by aggregation of signed directional accruals in the same grouping tuple.
+- This default netting-by-direction path does not require special `formula_ref` semantics.
+- `formula_ref` remains available for later advanced use-cases and is out of scope for this phase's semantic expansion.
 
 #### Pipeline binding by schema version
 
@@ -687,6 +748,70 @@ world:
           onboarded_count: 0
 ```
 
+### Illustrative v4 extension snippet (Vendor Alpha issuer fee + Scheme-issued settlement demand)
+
+This snippet is additive to the v3 example and demonstrates:
+- Vendor Alpha accrues a 2% issuer fee on `Transact-Purchase-Clearing` (from cardholder flow),
+- cardholder statement is emitted as non-payable/netted informational advisement,
+- fee proceeds are posted/transferred into the same settlement-payment source container used for outgoing obligations,
+- Scheme Access pipeline issues settlement demand where Vendor Alpha is debtor and Scheme is creditor.
+
+```yaml
+pipeline:
+  pipeline_profiles:
+    - pipeline_profile_id: "prepaid_card_pipeline"
+      fee_sequences:
+        - sequence_id: "issuer_fee_sequence"
+          fees:
+            - fee_id: "fee_issuer_cardholder_2pct"
+              trigger_ids: ["Transact-Purchase-Clearing"]
+              beneficiary_role: "self_agent"
+              payer_role: "cardholder_counterparty"
+              beneficiary_product_role: "product_role"
+              # Cardholder monthly statement-style disclosure; no cardholder payment action.
+              non_payable_statement: true
+              settlement_value_date_policy: "same_day"
+              settlement_value_date_offset_days: 0
+              amount_percentage: 0.02
+      posting_rules:
+        - trigger_id: "fee_issuer_cardholder_2pct"
+          source_ledger_ref: "customer_funds"
+          destination_ledger_ref: "settlement_funds"
+          amount_basis: "fee_amount"
+          value_date_policy: "same_day"
+          value_date_offset_days: 0
+      asset_transfer_rules:
+        - trigger_id: "fee_issuer_cardholder_2pct"
+          source_container_ref: "customer_funds_container"
+          destination_container_ref: "settlement_funds_container"
+          amount_basis: "fee_amount"
+          value_date_policy: "same_day"
+          value_date_offset_days: 0
+      settlement_payment_policies:
+        - applies_to_category: "fee"
+          source_container_ref: "settlement_funds_container"
+          auto_pay_enabled: true
+          hold_default: false
+        - applies_to_category: "settlement_demand"
+          source_container_ref: "settlement_funds_container"
+          auto_pay_enabled: true
+          hold_default: false
+    - pipeline_profile_id: "scheme_access_pipeline"
+      settlement_demand_sequences:
+        - sequence_id: "scheme_settlement_sequence"
+          settlement_demands:
+            - settlement_demand_id: "sd_scheme_purchase_clearing"
+              trigger_ids: ["Transact-Purchase-Clearing-Scheme"]
+              creditor_role: "self_product"
+              debtor_role: "payer_role"
+              invoice_category: "settlement_demand"
+              invoice_issue_date_policy: "next_working_day"
+              invoice_issue_date_offset_days: 0
+              payment_due_date_policy: "same_day"
+              payment_due_date_offset_days: 0
+              formula_ref: "net_settlement_purchase_minus_refund"
+```
+
 ### Spec-level acceptance checklist for this phase
 
 - YAML schema defines Money, Currency Catalog, FX, Calendar, and Region contracts without requiring runtime implementation in this phase.
@@ -699,6 +824,8 @@ world:
 - World entities may map to regions via `region_id`, enabling region-specific calendar context.
 - `settlement_trigger_event` remains part of schema contracts and is runtime-targeted with invoice/settlement lifecycle processing in v4 scope.
 - `routing_completion_mode` on destinations defines root-blocking (`synchronous`) vs deferred (`asynchronous`) fan-out behavior.
+- Settlement-demand sequences are separate from fee sequences and may reverse creditor/debtor direction by net flow.
+- Lifecycle date fields are explicit (`accrual_date`, `invoice_issue_date`, `payment_due_date`) and must not be conflated.
 - Example YAML files exist for currency catalog, local FX rates, and local calendar holiday overlays.
 
 ### Deferred beyond v0

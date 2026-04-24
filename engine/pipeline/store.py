@@ -22,13 +22,16 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS intents (
     tick_id INTEGER, simulation_date TEXT, pipeline_profile_id TEXT,
     product_id TEXT, intent_id TEXT, parent_intent_id TEXT,
+    intent_stage TEXT, root_intent_id TEXT,
     destination_role TEXT, destination_product_id TEXT, destination_vendor_id TEXT,
     txn_count INTEGER, amount TEXT, currency TEXT,
     value_date_policy TEXT, resolved_value_date TEXT,
-    PRIMARY KEY (tick_id, intent_id, product_id)
+    routing_completion_mode TEXT, status TEXT, reason_code TEXT,
+    PRIMARY KEY (tick_id, intent_id, product_id, intent_stage)
 );
 CREATE INDEX IF NOT EXISTS ix_intents_tick ON intents(tick_id);
 CREATE INDEX IF NOT EXISTS ix_intents_product ON intents(product_id);
+CREATE INDEX IF NOT EXISTS ix_intents_root ON intents(root_intent_id);
 
 CREATE TABLE IF NOT EXISTS fees (
     tick_id INTEGER, simulation_date TEXT, pipeline_profile_id TEXT,
@@ -67,7 +70,8 @@ CREATE TABLE IF NOT EXISTS invoices (
     product_id TEXT, invoice_id TEXT PRIMARY KEY, fee_id TEXT,
     accrual_tick_id INTEGER, accrual_date TEXT,
     beneficiary_product_id TEXT, payer_agent_id TEXT, payer_product_id TEXT,
-    amount TEXT, currency TEXT, status TEXT
+    amount TEXT, currency TEXT, status TEXT,
+    component_count INTEGER, component_tick_ids TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_invoices_tick ON invoices(tick_id);
 
@@ -119,13 +123,15 @@ class PipelineStore:
     def _insert_intent(self, d: dict) -> None:
         amt = d.get("amount") or {}
         self._conn.execute(
-            "INSERT OR REPLACE INTO intents VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO intents VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 d.get("tick_id"), d.get("simulation_date"), d.get("pipeline_profile_id"),
                 d.get("product_id"), d.get("intent_id"), d.get("parent_intent_id"),
+                d.get("intent_stage"), d.get("root_intent_id"),
                 d.get("destination_role"), d.get("destination_product_id"), d.get("destination_vendor_id"),
                 d.get("txn_count"), self._money_str(amt), amt.get("currency") if isinstance(amt, dict) else None,
                 d.get("value_date_policy"), d.get("resolved_value_date"),
+                d.get("routing_completion_mode"), d.get("status"), d.get("reason_code"),
             ),
         )
 
@@ -175,8 +181,9 @@ class PipelineStore:
 
     def _insert_invoice(self, d: dict) -> None:
         amt = d.get("amount") or {}
+        component_ticks = d.get("component_tick_ids") or []
         self._conn.execute(
-            "INSERT OR REPLACE INTO invoices VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO invoices VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 d.get("tick_id"), d.get("simulation_date"), d.get("pipeline_profile_id"),
                 d.get("product_id"), d.get("invoice_id"), d.get("fee_id"),
@@ -184,6 +191,8 @@ class PipelineStore:
                 d.get("beneficiary_product_id"), d.get("payer_agent_id"), d.get("payer_product_id"),
                 self._money_str(amt), amt.get("currency") if isinstance(amt, dict) else None,
                 d.get("status"),
+                d.get("component_count"),
+                ",".join(str(t) for t in component_ticks) if component_ticks else "",
             ),
         )
 

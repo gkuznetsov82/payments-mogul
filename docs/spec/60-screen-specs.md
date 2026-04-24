@@ -65,6 +65,7 @@ Text-first presentation remains valid, but operator workflow must include focusa
   - transaction intents (incoming/outgoing, source product, destination role/product),
   - original incoming intents and routed derivatives shown together with shared correlation key,
   - fee accrual records (fee id, beneficiary role/product, amount components),
+  - settlement-demand accrual records (creditor/debtor role, amount, category),
   - value transfer records (source/destination container refs, amount, value date).
 - Required columns/fields:
   - `tick_id`, `simulation_date`, `product_id`, `pipeline_profile_id`,
@@ -100,6 +101,23 @@ Text-first presentation remains valid, but operator workflow must include focusa
   - highlight mismatches (`unmapped`, `unbalanced`),
   - jump from account line to contributing transfer rows.
 
+### View E — Obligations (invoices and settlement demands)
+
+- Purpose: operational management of payables/receivables and settlement-demand lifecycle.
+- Required controls:
+  - agent selector dropdown (required scope selector for this view),
+  - role-side switch (`creditor` | `debtor`) for selected agent perspective,
+  - queue switch (`issued` | `received`) for selected role-side.
+- Required blocks:
+  - invoice list (category-aware: `fee` vs `settlement_demand`) with lifecycle dates (`accrual_date`, `invoice_issue_date`, `payment_due_date`),
+  - settlement-demand list with same date semantics and status/residual fields,
+  - related message panel (informational only; actions are not performed on messages).
+- Required actions (entity-bound):
+  - `pay_now`, `hold`, `release_hold` on selected `invoice_id` / `settlement_demand_id`.
+- Required interaction behavior:
+  - selecting an agent and switching creditor/debtor perspectives must re-scope both invoice and settlement-demand lists,
+  - `issued` and `received` lists must be available from both perspectives where data exists.
+
 ### Minimum navigation contract
 
 - Views must be keyboard-switchable as primary sections (tabs or equivalent).
@@ -109,6 +127,7 @@ Text-first presentation remains valid, but operator workflow must include focusa
   - `Pipeline`
   - `Books`
   - `Accounts`
+  - `Obligations` (agent-scoped invoices and settlement demands; issued/received, creditor/debtor views)
   - `Logs` (command/outcome/event stream; not required to be always visible).
 - If viewport is constrained, section switching may become paged, but all required sections remain reachable.
 

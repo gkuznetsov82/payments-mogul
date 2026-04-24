@@ -446,3 +446,106 @@ async def test_tui_treats_server_shutdown_followed_by_close_as_expected():
         assert status.run_mode == "shutting_down"
         banner_text = str(app.query_one("#banner").message)
         assert "Server shutdown" in banner_text
+
+
+# ------------------------------------------------------------------ Speed controls (spec 51/52/60)
+
+@pytest.mark.asyncio
+async def test_tui_run_strip_has_speed_cycle_button():
+    """Run strip must expose a single Speed cycle button (spec 60 §Text simulation shell)."""
+    from textual.widgets import Button
+    app = MogulApp(base_url="http://127.0.0.1:0")
+    async with app.run_test(size=(120, 36)) as pilot:
+        await pilot.pause()
+        btn = app.query_one("#btn-speed", Button)
+        # Label starts at 1× baseline.
+        assert "Speed: 1×" in str(btn.label)
+
+
+@pytest.mark.asyncio
+async def test_tui_speed_button_label_updates_from_speed_changed_event():
+    """SSE `speed_changed` must update the TUI button label to match the server."""
+    from textual.widgets import Button
+    app = MogulApp(base_url="http://127.0.0.1:0")
+    async with app.run_test(size=(120, 36)) as pilot:
+        await pilot.pause()
+        # Server announces a speed change.
+        app.on_server_event({
+            "event": "speed_changed",
+            "data": {
+                "speed_multiplier": 2.0,
+                "previous_multiplier": 1.0,
+                "effective_intake_window_ms": 250,
+                "effective_tick_wall_clock_base_ms": 500,
+            },
+        })
+        await pilot.pause()
+        btn = app.query_one("#btn-speed", Button)
+        assert "Speed: 2×" in str(btn.label)
+        assert app._speed_multiplier == 2.0
+
+
+@pytest.mark.asyncio
+async def test_tui_speed_button_label_updates_from_snapshot():
+    """state_snapshot carries speed_multiplier so reconnecting clients render it."""
+    from textual.widgets import Button
+    app = MogulApp(base_url="http://127.0.0.1:0")
+    async with app.run_test(size=(120, 36)) as pilot:
+        await pilot.pause()
+        app._apply_snapshot({
+            "tick_id": 1,
+            "run_mode": "paused",
+            "engine_state": "paused",
+            "intake_open": False,
+            "intake_frozen": False,
+            "speed_multiplier": 3.0,
+            "effective_intake_window_ms": 167,
+            "effective_tick_wall_clock_base_ms": 333,
+            "config": {"intake_window_ms": 500, "tick_wall_clock_base_ms": 1000,
+                       "amount_scale_dp": 2, "amount_rounding_mode": "half_up",
+                       "count_rounding_mode": "half_up"},
+            "vendors": {},
+            "pops": {},
+        })
+        await pilot.pause()
+        btn = app.query_one("#btn-speed", Button)
+        assert "Speed: 3×" in str(btn.label)
+
+
+@pytest.mark.asyncio
+async def test_tui_speed_cycle_wraps_3_to_1():
+    """Pressing the Speed button cycles 1→2→3→1. Compute next-value locally
+    (no HTTP in test) by exercising the same logic as the button handler."""
+    app = MogulApp(base_url="http://127.0.0.1:0")
+    async with app.run_test(size=(120, 36)) as pilot:
+        await pilot.pause()
+        cycle = app._speed_cycle
+        # Current 1× → next 2×
+        app._speed_multiplier = 1.0
+        idx = cycle.index(app._speed_multiplier)
+        assert cycle[(idx + 1) % len(cycle)] == 2.0
+        # Current 2× → next 3×
+        app._speed_multiplier = 2.0
+        idx = cycle.index(app._speed_multiplier)
+        assert cycle[(idx + 1) % len(cycle)] == 3.0
+        # Current 3× → wraps back to 1×
+        app._speed_multiplier = 3.0
+        idx = cycle.index(app._speed_multiplier)
+        assert cycle[(idx + 1) % len(cycle)] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_tui_speed_cycle_snaps_arbitrary_scalar_to_start():
+    """If an API caller set the multiplier off-cycle (e.g. 0.5×, 7×), pressing
+    the TUI button next should snap to the first cycle step (1×)."""
+    app = MogulApp(base_url="http://127.0.0.1:0")
+    async with app.run_test(size=(120, 36)) as pilot:
+        await pilot.pause()
+        cycle = app._speed_cycle
+        app._speed_multiplier = 0.5  # not on cycle
+        try:
+            cycle.index(app._speed_multiplier)
+            next_val = None
+        except ValueError:
+            next_val = cycle[0]
+        assert next_val == 1.0

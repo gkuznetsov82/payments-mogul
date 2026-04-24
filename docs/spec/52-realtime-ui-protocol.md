@@ -79,15 +79,24 @@ To support pipeline/ledger observability sections in **`60-screen-specs.md`**, s
     - execution status (`pending` | `executed` | `rejected`)
     - reason code for non-success paths.
 - `fee_accrual_event`
-  - fee id, beneficiary role/product, amount components (`count_cost`, `amount_percentage`), accrual status.
+  - fee id, amount components (`count_cost`, `amount_percentage`), accrual status.
+  - must include resolved creditor/debtor identities for directionality-sensitive fee contracts.
+- `settlement_demand_event`
+  - settlement-demand accrual details with explicit creditor/debtor roles and amount.
+  - if issuer is debtor, counterparty recipient view must represent receivable expectation while payment execution remains debtor-side.
 - `value_transfer_event`
   - source/destination container refs, amount, value date policy + resolved date, execution status.
 - `posting_entry_event`
   - source/destination ledger refs, debit/credit amount, posting date/status.
 - `invoice_transaction_event`
-  - emitted on due-date lifecycle transition from accrued fee to invoiced artifact, representing aggregated fees due on the same date.
+  - emitted on invoice issue date from accrued artifacts (`fee` or `settlement_demand`), representing aggregate advisement group for same category/recipient/issue-date tuple.
+  - must include explicit lifecycle date fields: `accrual_date`, `invoice_issue_date`, `payment_due_date`.
+  - should include payable semantics:
+    - `payable` (`true` | `false`)
+    - optional settlement mode/status token (for example `netted_internal`) for non-payable informational statements.
 - `settlement_resolution_event`
   - emitted after invoice handling with final settlement outcome (`paid` or `failed`) and residual amount.
+  - `final_status=paid` must only occur when transfer execution succeeded for settled amount.
 
 Event payloads should include consistent correlation keys for cross-view drill-down:
 
@@ -97,8 +106,23 @@ Event payloads should include consistent correlation keys for cross-view drill-d
 - `product_id`
 - one or more of `intent_id`, `trigger_id`, `fee_id`, `invoice_id`
 - `root_intent_id` when intent fan-out/routing occurs
+- `invoice_category` where advisement/resolution events are emitted (`fee` | `settlement_demand`)
 
 For async fan-out paths, `transaction_intent_event` resolution emissions should reuse the same `intent_id` + `root_intent_id` as the original pending routed emission.
+
+### Message and action acknowledgement contract
+
+- Message events (`operator_message_event`) are informational and should include:
+  - `message_id`, `severity` (`info` | `warning` | `critical`), `message_type`, `agent_id`,
+  - entity correlation fields (`invoice_id` and/or `settlement_demand_id` where applicable).
+- Required message triggers include at minimum:
+  - unpaid item at/after `payment_due_date`,
+  - auto-pay skipped because item is on hold,
+  - auto-pay failure (insufficient funds / missing container mapping),
+  - unsolicited advisement with no mapping.
+- Operator action acknowledgements (`operator_action_ack_event`) must reference underlying entity IDs and action type (`pay_now`, `hold`, `release_hold`).
+- Operator actions are not bound to `message_id`; they are bound to `invoice_id` / `settlement_demand_id`.
+- Non-payable informational advisements (`payable=false`) must not expose payment actions in operator UIs.
 
 ### Payload minimums for date/currency visibility
 

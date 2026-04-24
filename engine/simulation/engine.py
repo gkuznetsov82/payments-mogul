@@ -83,6 +83,11 @@ class SimulationEngine:
         # Task handles (so reload/shutdown can cancel them cleanly)
         self._continuous_task: asyncio.Task | None = None
         self._next_day_task: asyncio.Task | None = None
+        # Wall-clock speed multiplier (spec 51 §Speed / 52 §Set speed / 60
+        # §Tick timing display contract). `>= 0.01` scalar; shrinks the full
+        # tick wall-clock budget (intake + inter-tick processing wait).
+        # Simulation math is unaffected — wall-clock only.
+        self.speed_multiplier: float = 1.0
         # v2 foundations runtime context (spec 40 §scenario.start_date, §money,
         # §currency_catalog). Populated from optional config sections; in v0
         # configs these stay at sensible defaults.
@@ -297,6 +302,74 @@ class SimulationEngine:
         return {"accepted": True, "effect": "advance_one_tick",
                 "run_mode": "paused", "command_scope": "world"}
 
+    # ------------------------------------------------------------------ speed control (spec 51/52/60)
+
+    async def set_speed(self, multiplier: float) -> dict:
+        """Set wall-clock speed multiplier (spec 51 §Speed / 52 §Set speed).
+
+        `multiplier` is a positive scalar: 1.0 = baseline pacing, 2.0 = half the
+        configured tick wall-clock budget, 0.5 = doubled budget (slow-mo). Only
+        affects wall-clock waits (intake countdown + inter-tick processing
+        wait); simulation math is unchanged (spec CLAUDE.md §Determinism).
+
+        Rejects non-finite or non-positive values with
+        `rejection_reason=invalid_speed_multiplier`.
+        """
+        import math
+        try:
+            m = float(multiplier)
+        except (TypeError, ValueError):
+            return {
+                "accepted": False,
+                "rejection_reason": "invalid_speed_multiplier",
+                "run_mode": self.run_mode,
+                "command_scope": "world",
+                "speed_multiplier": self.speed_multiplier,
+            }
+        if not math.isfinite(m) or m <= 0:
+            return {
+                "accepted": False,
+                "rejection_reason": "invalid_speed_multiplier",
+                "run_mode": self.run_mode,
+                "command_scope": "world",
+                "speed_multiplier": self.speed_multiplier,
+            }
+        # Guard-rail: clamp to a sensible scalar window to keep tick budgets
+        # finite and positive. 0.01×..100× spans slow-mo review through
+        # fast-forward smoke runs.
+        if m < 0.01:
+            m = 0.01
+        if m > 100.0:
+            m = 100.0
+        previous = self.speed_multiplier
+        self.speed_multiplier = m
+        await self._emit("speed_changed", {
+            "speed_multiplier": self.speed_multiplier,
+            "previous_multiplier": previous,
+            "effective_intake_window_ms": int(self._effective_intake_window_ms()),
+            "effective_tick_wall_clock_base_ms": int(self._effective_tick_wall_clock_base_ms()),
+        })
+        return {
+            "accepted": True,
+            "effect": "speed_changed" if previous != m else "noop",
+            "run_mode": self.run_mode,
+            "command_scope": "world",
+            "speed_multiplier": self.speed_multiplier,
+            "previous_multiplier": previous,
+            "effective_intake_window_ms": int(self._effective_intake_window_ms()),
+            "effective_tick_wall_clock_base_ms": int(self._effective_tick_wall_clock_base_ms()),
+        }
+
+    def _effective_intake_window_ms(self) -> float:
+        """Speed-adjusted intake window (spec 60 §Tick timing display contract)."""
+        base = float(self.cfg.simulation.intake_window_ms)
+        return base / max(self.speed_multiplier, 0.01)
+
+    def _effective_tick_wall_clock_base_ms(self) -> float:
+        """Speed-adjusted total tick wall-clock budget (spec 40 §tick cycle timing)."""
+        base = float(self.cfg.simulation.tick_wall_clock_base_ms)
+        return base / max(self.speed_multiplier, 0.01)
+
     async def submit_command(self, cmd: ControlCommand) -> CommandAck:
         async with self._intake_lock:
             if self._intake_open:
@@ -500,12 +573,14 @@ class SimulationEngine:
                 await self._emit("state_snapshot", self.build_snapshot())
                 return
             # tick_wall_clock_base_ms is the TOTAL tick duration (40-yaml-config).
+            # Speed-adjusted per spec 51/52/60: effective budget shrinks at
+            # 2× / 3×; simulation math is unaffected (CLAUDE.md §Determinism).
             # The intake window already consumed some of it; we wait for the
-            # remainder, scaled by speed (speed=1× for now).
-            base_ms = self.cfg.simulation.tick_wall_clock_base_ms
-            if base_ms > 0:
+            # remainder. Live speed changes take effect on the next tick.
+            effective_base_ms = self._effective_tick_wall_clock_base_ms()
+            if effective_base_ms > 0:
                 elapsed_ms = (time.monotonic() - tick_start) * 1000
-                wait_ms = max(0.0, base_ms - elapsed_ms)
+                wait_ms = max(0.0, effective_base_ms - elapsed_ms)
                 if wait_ms > 0:
                     await asyncio.sleep(wait_ms / 1000)
 
@@ -560,14 +635,21 @@ class SimulationEngine:
             self._pending.clear()
             self._intake_open = True
 
+        # Spec 60 §Tick timing display contract: the intake/tick values on this
+        # event are EFFECTIVE (speed-adjusted) so client countdowns reflect the
+        # real wall-clock time the server will spend. The base values are
+        # observable via state_snapshot.config for UIs that want them.
+        effective_intake_ms = int(self._effective_intake_window_ms())
+        effective_tick_ms = int(self._effective_tick_wall_clock_base_ms())
         await self._emit("tick_intake_window_opened", {
             "tick_id": self.tick_id + 1,
-            "intake_window_ms": self.cfg.simulation.intake_window_ms,
-            "tick_wall_clock_base_ms": self.cfg.simulation.tick_wall_clock_base_ms,
+            "intake_window_ms": effective_intake_ms,
+            "tick_wall_clock_base_ms": effective_tick_ms,
+            "speed_multiplier": self.speed_multiplier,
         })
 
         if not next_day_mode:
-            await self._intake_wait(self.cfg.simulation.intake_window_ms)
+            await self._intake_wait(effective_intake_ms)
 
         # Phase 2: close intake window
         async with self._intake_lock:
@@ -631,10 +713,11 @@ class SimulationEngine:
         # Phase 5: commit. Compute remaining inter-tick wait so the client can
         # render an accurate "next tick in N" countdown without doing its own
         # math (40-yaml-config: intake is part of the total tick budget).
-        base_ms = self.cfg.simulation.tick_wall_clock_base_ms
-        if base_ms > 0:
+        # Speed-adjusted (spec 51/52/60): effective budget shrinks at > 1×.
+        effective_base_ms = self._effective_tick_wall_clock_base_ms()
+        if effective_base_ms > 0:
             elapsed_ms = (time.monotonic() - tick_start_monotonic) * 1000
-            inter_tick_wait_ms = int(max(0, base_ms - elapsed_ms))
+            inter_tick_wait_ms = int(max(0, effective_base_ms - elapsed_ms))
         else:
             inter_tick_wait_ms = 0
 
@@ -644,6 +727,7 @@ class SimulationEngine:
             "simulation_date": self.simulation_date.isoformat(),
             "committed_at": time.time(),
             "inter_tick_wait_ms": inter_tick_wait_ms,
+            "speed_multiplier": self.speed_multiplier,
             **summary,
         })
         await self._emit("state_snapshot", self.build_snapshot())
@@ -717,6 +801,13 @@ class SimulationEngine:
             "scenario_start_date_resolved": self.scenario_start_date_resolved.isoformat(),
             "default_currency": self.default_currency,
             "money_object_mode": self.money_object_mode,
+            # Wall-clock pacing (spec 51/52/60). Speed_multiplier is reported
+            # at top level so reconnecting clients pick it up without probing
+            # the config block. Effective intake/tick shown so UIs don't have
+            # to do the math (base × 1/speed).
+            "speed_multiplier": self.speed_multiplier,
+            "effective_intake_window_ms": int(self._effective_intake_window_ms()),
+            "effective_tick_wall_clock_base_ms": int(self._effective_tick_wall_clock_base_ms()),
             "config": {
                 "intake_window_ms": sim.intake_window_ms,
                 "tick_wall_clock_base_ms": sim.tick_wall_clock_base_ms,

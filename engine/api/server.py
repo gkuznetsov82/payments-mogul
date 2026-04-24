@@ -95,6 +95,12 @@ class CommandRequest(BaseModel):
     product_id: str
 
 
+class SpeedRequest(BaseModel):
+    # Positive scalar; UI buttons send {1, 2, 3} but any positive scalar is
+    # accepted (spec 51 §Speed / 52 §Set speed). Engine clamps to [0.01, 100].
+    multiplier: float
+
+
 # ------------------------------------------------------------------ control routes
 
 @app.get("/health")
@@ -132,6 +138,18 @@ async def next_day():
     engine = get_engine()
     result = await engine.next_day()
     return {"ok": result.get("accepted", True), "tick_id": engine.tick_id, **result}
+
+
+@app.post("/control/speed")
+async def set_speed(req: SpeedRequest):
+    """Set the wall-clock speed multiplier (spec 51 §Speed / 52 §Set speed).
+
+    Positive scalar; UI typically sends {1, 2, 3}. Only affects wall-clock
+    pacing between ticks; simulation math is unchanged.
+    """
+    engine = get_engine()
+    result = await engine.set_speed(req.multiplier)
+    return {"ok": result.get("accepted", False), **result}
 
 
 @app.post("/control/reload_config")

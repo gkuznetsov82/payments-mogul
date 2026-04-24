@@ -84,18 +84,37 @@ Legend: `A` = Accountable, `R` = Responsible, `C` = Consulted.
 
 1. Implement `routing_completion_mode` per destination leg with deterministic behavior:
    - synchronous legs are root-blocking within current tick boundary,
-   - asynchronous legs resolve in later ticks without blocking root outcome.
+   - asynchronous legs resolve in later ticks (or same tick) without blocking root outcome.
 2. Implement root-intent success-gating from synchronous legs only.
-3. Implement invoice/settlement lifecycle transitions and stream events (`invoice_transaction_event`, `settlement_resolution_event`) with correlation continuity.
+3. Implement invoice/settlement lifecycle transitions and stream events (`invoice_transaction_event`, `settlement_resolution_event`) with correlation continuity and transfer-backed paid resolution.
 4. Add tests/fixtures for:
    - synchronous same-day success,
-   - synchronous deferred-leg failure-fast behavior,
+   - synchronous deferred-leg failure on config loading,
    - asynchronous pending then resolved behavior across ticks.
+5. Implement and test settlement-demand accrual/advisement path as distinct from fees, including creditor/debtor direction reversals.
+6. Implement message + operator UX contract:
+   - messages are informational (severity + correlation),
+   - operator actions target entity IDs (`invoice_id` / `settlement_demand_id`), not message IDs,
+   - agent-scoped creditor/debtor + issued/received obligations views are supported.
+7. Upgrade baseline example configs/fixtures to demonstrate the new contracts:
+   - `configs/prototype_v3_runtime_example.yaml`
+   - `tests/fixtures/v3_pipeline_full.yaml`
+   - include (a) Vendor Alpha -> Scheme settlement-demand payable flow with demand issuance in Scheme Access pipeline, and (b) Vendor Alpha 2% cardholder fee flow funding the same payment source container.
+   - cardholder fee statement should be modeled as non-payable/netted advisement (no cardholder payment action).
+   - demonstrate distinct `invoice_issue_date` and `payment_due_date` behavior for fee statements.
 
 **Acceptance criteria**
 - Root intent outcome follows declared routing completion modes deterministically.
-- Async routed intents never block root transaction completion across ticks.
+- Async routed intents never block root transaction completion across ticks, or within the same tick.
 - Invoice and settlement lifecycle events are emitted with stable correlation keys and correct state progression.
+- `final_status=paid` must correlate to successful transfer execution for settled amount.
+- Invoice/advisement date semantics are explicit and consistent (`accrual_date`, `invoice_issue_date`, `payment_due_date`).
+- Settlement-demand behavior is test-covered for direction flips and aggregation semantics.
+- Fee behavior is test-covered for bidirectional creditor/debtor directionality.
+- Settlement-demand date policies use the same policy/offset primitives as the rest of pipeline contracts.
+- Opposing purchase/refund settlement-demand flows are test-covered for natural directional netting without requiring formula-specific behavior.
+- UI/action contract is test-covered for entity-bound actions and agent-perspective obligations views.
+- Non-payable advisement path is test-covered (`payable=false` -> no payment action exposure, informational only).
 
 ---
 

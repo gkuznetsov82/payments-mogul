@@ -690,3 +690,193 @@ async def test_shutdown_cancels_running_continuous_loop():
     await engine.shutdown(reason="test_cancel", grace_period_ms=10, reconnect_after_ms=100)
     assert engine.state == EngineState.SHUTTING_DOWN
     assert engine._continuous_task is None or engine._continuous_task.done()
+
+
+# ------------------------------------------------------------------ speed multiplier (51 §Speed, 52 §Set speed, 60 §Tick timing display)
+
+@pytest.mark.asyncio
+async def test_set_speed_default_is_1x():
+    """Fresh engines start at 1× (baseline pacing)."""
+    engine = make_engine()
+    assert engine.speed_multiplier == 1.0
+    snap = engine.build_snapshot()
+    assert snap["speed_multiplier"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_set_speed_emits_speed_changed_event_and_returns_status():
+    """POST /control/speed → engine.set_speed must emit speed_changed SSE and
+    return a world-scoped status dict with effective durations."""
+    engine = make_engine()
+    q = engine.subscribe()
+    result = await engine.set_speed(2.0)
+    assert result["accepted"] is True
+    assert result["command_scope"] == "world"
+    assert result["speed_multiplier"] == 2.0
+    assert result["previous_multiplier"] == 1.0
+    # Effective durations are base / speed.
+    sim = engine.cfg.simulation
+    assert result["effective_intake_window_ms"] == int(sim.intake_window_ms / 2.0)
+    assert result["effective_tick_wall_clock_base_ms"] == int(sim.tick_wall_clock_base_ms / 2.0)
+
+    events = await drain_events(q)
+    speed_events = [e for e in events if e["event"] == "speed_changed"]
+    assert len(speed_events) == 1
+    payload = speed_events[0]["data"]
+    assert payload["speed_multiplier"] == 2.0
+    assert payload["previous_multiplier"] == 1.0
+    assert "effective_intake_window_ms" in payload
+    assert "effective_tick_wall_clock_base_ms" in payload
+
+
+@pytest.mark.asyncio
+async def test_set_speed_rejects_non_positive_and_non_finite():
+    """Spec 51 §Speed: multiplier must be a positive scalar."""
+    import math
+    engine = make_engine()
+    for bad in (0, -1.0, -0.5, math.nan, math.inf, -math.inf):
+        result = await engine.set_speed(bad)
+        assert result["accepted"] is False, f"should have rejected {bad}"
+        assert result["rejection_reason"] == "invalid_speed_multiplier"
+        # Speed stays at prior value on reject.
+        assert engine.speed_multiplier == 1.0
+
+
+@pytest.mark.asyncio
+async def test_set_speed_clamps_to_supported_range():
+    """Extreme values are clamped so tick budgets stay finite + positive."""
+    engine = make_engine()
+    # Well-below lower bound.
+    result = await engine.set_speed(0.0005)
+    assert result["accepted"] is True
+    assert result["speed_multiplier"] == 0.01
+    # Above upper bound.
+    result = await engine.set_speed(9_999_999)
+    assert result["accepted"] is True
+    assert result["speed_multiplier"] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_set_speed_accepts_arbitrary_scalar_per_api_contract():
+    """Spec 51 §Speed: API accepts scalar multiplier (not just 1/2/3)."""
+    engine = make_engine()
+    result = await engine.set_speed(0.5)
+    assert result["accepted"] is True
+    assert engine.speed_multiplier == 0.5
+    # Effective intake window doubles at 0.5× (slow-mo).
+    sim = engine.cfg.simulation
+    assert int(engine._effective_intake_window_ms()) == int(sim.intake_window_ms / 0.5)
+
+
+@pytest.mark.asyncio
+async def test_set_speed_shrinks_tick_committed_inter_tick_wait():
+    """Spec 52 §Set speed + spec 60 §Tick timing display: inter_tick_wait_ms in
+    tick_committed payload must reflect the speed-adjusted budget."""
+    cfg, _ = load_config(VALID)
+    cfg.simulation.intake_window_ms = 100
+    cfg.simulation.tick_wall_clock_base_ms = 2000  # 2s at 1×
+    engine = SimulationEngine(cfg, config_path=VALID)
+    engine.state_from_idle()
+    # Set 4× before running: effective budget = 500ms.
+    await engine.set_speed(4.0)
+    q = engine.subscribe()
+    engine.state = EngineState.RUNNING
+    await engine._run_one_tick(next_day_mode=False)
+
+    events = await drain_events(q)
+    committed = next(e for e in events if e["event"] == "tick_committed")
+    wait_ms = committed["data"]["inter_tick_wait_ms"]
+    # Effective base is 500ms; intake consumed ~25ms at 4× (100/4); remaining
+    # should be close to 475ms. Allow generous envelope for CI jitter.
+    assert 300 <= wait_ms <= 500, (
+        f"speed-adjusted inter_tick_wait_ms expected in [300, 500], got {wait_ms}"
+    )
+    # tick_committed payload also carries speed_multiplier.
+    assert committed["data"]["speed_multiplier"] == 4.0
+
+
+@pytest.mark.asyncio
+async def test_tick_intake_window_opened_carries_effective_durations():
+    """Spec 60 §Tick timing display contract: the event's intake_window_ms and
+    tick_wall_clock_base_ms are EFFECTIVE (speed-adjusted) values, not base."""
+    cfg, _ = load_config(VALID)
+    cfg.simulation.intake_window_ms = 100
+    cfg.simulation.tick_wall_clock_base_ms = 1000
+    engine = SimulationEngine(cfg, config_path=VALID)
+    engine.state_from_idle()
+    await engine.set_speed(2.0)
+    q = engine.subscribe()
+    await engine._run_one_tick(next_day_mode=True)
+
+    events = await drain_events(q)
+    opened = next(e for e in events if e["event"] == "tick_intake_window_opened")
+    assert opened["data"]["intake_window_ms"] == 50   # 100 / 2
+    assert opened["data"]["tick_wall_clock_base_ms"] == 500  # 1000 / 2
+    assert opened["data"]["speed_multiplier"] == 2.0
+
+
+@pytest.mark.asyncio
+async def test_speed_persists_across_reload_config():
+    """Spec decision: speed is an operator-level wall-clock setting; reload
+    replaces world state but preserves current speed."""
+    engine = make_engine()
+    await engine.set_speed(3.0)
+    # Reload (valid config).
+    result = await engine.reload_config()
+    assert result["accepted"] is True
+    # Speed survived.
+    assert engine.speed_multiplier == 3.0
+    snap = engine.build_snapshot()
+    assert snap["speed_multiplier"] == 3.0
+
+
+@pytest.mark.asyncio
+async def test_speed_does_not_affect_simulation_outcomes():
+    """CLAUDE.md §Determinism: speed only changes wall-clock pacing — the
+    same seed/config/command stream must produce identical outcomes at 1× vs 3×."""
+    async def run_one_at_speed(speed: float) -> dict:
+        engine = make_engine()
+        await engine.set_speed(speed)
+        await engine._run_one_tick(next_day_mode=True)
+        snap = engine.build_snapshot()
+        # Strip volatile fields (speed + timing) before comparison.
+        for k in ("speed_multiplier", "effective_intake_window_ms",
+                  "effective_tick_wall_clock_base_ms"):
+            snap.pop(k, None)
+        return snap
+
+    snap_1x = await run_one_at_speed(1.0)
+    snap_3x = await run_one_at_speed(3.0)
+    # Core simulation state (vendors / pops / tick) identical.
+    assert snap_1x["tick_id"] == snap_3x["tick_id"]
+    assert snap_1x["vendors"] == snap_3x["vendors"]
+    assert snap_1x["pops"] == snap_3x["pops"]
+    assert snap_1x["recent_outcomes"] == snap_3x["recent_outcomes"]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_carries_speed_and_effective_durations():
+    """State snapshot must expose speed_multiplier + effective durations so
+    reconnecting clients can render current pacing without probing tick events."""
+    engine = make_engine()
+    await engine.set_speed(2.5)
+    snap = engine.build_snapshot()
+    assert snap["speed_multiplier"] == 2.5
+    sim = engine.cfg.simulation
+    assert snap["effective_intake_window_ms"] == int(sim.intake_window_ms / 2.5)
+    assert snap["effective_tick_wall_clock_base_ms"] == int(sim.tick_wall_clock_base_ms / 2.5)
+    # Base values still in config block for reference.
+    assert snap["config"]["intake_window_ms"] == sim.intake_window_ms
+    assert snap["config"]["tick_wall_clock_base_ms"] == sim.tick_wall_clock_base_ms
+
+
+@pytest.mark.asyncio
+async def test_set_speed_same_value_is_noop_effect_but_still_accepted():
+    """Setting the same speed twice: second call returns accepted=True, effect=noop."""
+    engine = make_engine()
+    first = await engine.set_speed(2.0)
+    assert first["effect"] == "speed_changed"
+    second = await engine.set_speed(2.0)
+    assert second["accepted"] is True
+    assert second["effect"] == "noop"
+    assert second["speed_multiplier"] == 2.0

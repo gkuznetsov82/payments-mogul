@@ -170,6 +170,10 @@ class MogulApp(App):
     #agent-target-select {
         margin: 0 0 1 0;
     }
+    #btn-speed {
+        width: 14;
+        min-width: 12;
+    }
     #run-strip .world-btn {
         width: 22;
     }
@@ -233,6 +237,11 @@ class MogulApp(App):
         # from posting_entry_event + value_transfer_event. Key: (product_id, path).
         self._books_by_path: dict[str, dict] = {}
         self._accounts_by_path: dict[str, dict] = {}
+        # Speed pacing (spec 51 §Speed / 52 §Set speed). Cycle button steps
+        # through 1× → 2× → 3× → 1×; label reflects the server's authoritative
+        # value (updated via speed_changed event + state_snapshot).
+        self._speed_multiplier: float = 1.0
+        self._speed_cycle: tuple[float, ...] = (1.0, 2.0, 3.0)
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -246,6 +255,9 @@ class MogulApp(App):
             yield Button("▶  Resume", id="btn-resume", variant="success")
             yield Button("⏸  Pause", id="btn-pause", variant="warning")
             yield Button("⏭  Next Day", id="btn-next-day", variant="primary")
+            # Spec 51 §Speed / 52 §Set speed: cycle 1× → 2× → 3× → 1×.
+            # Label reflects server's authoritative speed_multiplier.
+            yield Button("Speed: 1×", id="btn-speed", variant="default")
             yield Button("⟳  Reload Config", id="btn-reload",
                          variant="primary", classes="world-btn")
             yield Button("⛔  Shutdown", id="btn-shutdown",
@@ -735,6 +747,20 @@ class MogulApp(App):
                 f"[red]world_restart_failed[/] gen={gen} "
                 f"codes={codes} reason={reason}"
             )
+        elif event_type == "speed_changed":
+            # Spec 51/52: server-authoritative speed update. Refresh local
+            # state + button label; tick_committed's inter_tick_wait_ms is
+            # already speed-adjusted on the next emission so countdown math
+            # needs no changes here.
+            new_speed = float(data.get("speed_multiplier", 1.0))
+            prev = float(data.get("previous_multiplier", self._speed_multiplier))
+            self._speed_multiplier = new_speed
+            self._refresh_speed_button()
+            self._log_line(
+                f"[cyan]speed_changed[/] {prev:g}× → {new_speed:g}× "
+                f"(intake={self._format_ms(int(data.get('effective_intake_window_ms', 0)))}, "
+                f"tick={self._format_ms(int(data.get('effective_tick_wall_clock_base_ms', 0)))})"
+            )
         elif event_type == "server_shutdown":
             self._server_shutdown_received = True
             reason = data.get("reason", "unknown")
@@ -780,6 +806,12 @@ class MogulApp(App):
             self._amount_scale_dp = int(cfg["amount_scale_dp"])
         # Note: tick_wall_clock_base_ms in snapshot is informational only; the
         # TUI's "next tick" countdown uses inter_tick_wait_ms from tick_committed.
+
+        # Speed pacing (spec 51/52). Snapshot carries server-authoritative
+        # multiplier + effective durations — sync local state + button label.
+        if "speed_multiplier" in snap:
+            self._speed_multiplier = float(snap["speed_multiplier"])
+            self._refresh_speed_button()
 
         # Vendor / product info (spec 60 §Numeric presentation: counts as
         # integers, amounts at configured scale).
@@ -985,6 +1017,29 @@ class MogulApp(App):
         if event.select.id == "agent-target-select":
             self._selected_target_key = event.value  # type: ignore[assignment]
 
+    # ------------------------------------------------------------------ speed display
+
+    def _refresh_speed_button(self) -> None:
+        """Update the Run-strip speed button label + active highlight.
+
+        Label format: "Speed: 2×" — integer-typed when the multiplier is a
+        whole number, otherwise a compact decimal so arbitrary-scalar values
+        set via API (per spec 51) are readable.
+        """
+        try:
+            btn = self.query_one("#btn-speed", Button)
+        except Exception:
+            return
+        m = self._speed_multiplier
+        if abs(m - round(m)) < 1e-6:
+            label = f"Speed: {int(round(m))}×"
+        else:
+            label = f"Speed: {m:g}×"
+        btn.label = label
+        # Variant acts as visual highlight: baseline 1× keeps the neutral look,
+        # anything faster uses `warning` so operators notice they're off-default.
+        btn.variant = "default" if abs(m - 1.0) < 1e-6 else "warning"
+
     # ------------------------------------------------------------------ button handlers
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -1005,6 +1060,21 @@ class MogulApp(App):
             elif bid == "btn-shutdown":
                 r = await self._http.post("/control/shutdown")
                 self._log_control_response("shutdown", r)
+            elif bid == "btn-speed":
+                # Spec 51/52: cycle 1× → 2× → 3× → 1×. Compute next value from
+                # the server-authoritative _speed_multiplier (updated via
+                # speed_changed + state_snapshot), then POST.
+                cycle = self._speed_cycle
+                current = self._speed_multiplier
+                try:
+                    idx = cycle.index(current)
+                    nxt = cycle[(idx + 1) % len(cycle)]
+                except ValueError:
+                    # Current speed isn't on the cycle (e.g., API-set arbitrary
+                    # scalar). Snap to 1× to give the operator a known-good step.
+                    nxt = cycle[0]
+                r = await self._http.post("/control/speed", json={"multiplier": nxt})
+                self._log_control_response("speed", r)
             elif bid in ("btn-open-ob", "btn-close-ob", "btn-open-tx", "btn-close-tx"):
                 ctype = {
                     "btn-open-ob": "OpenOnboarding",
