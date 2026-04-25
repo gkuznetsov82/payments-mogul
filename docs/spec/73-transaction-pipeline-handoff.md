@@ -95,13 +95,24 @@ Legend: `A` = Accountable, `R` = Responsible, `C` = Consulted.
 6. Implement message + operator UX contract:
    - messages are informational (severity + correlation),
    - operator actions target entity IDs (`invoice_id` / `settlement_demand_id`), not message IDs,
-   - agent-scoped creditor/debtor + issued/received obligations views are supported.
-7. Upgrade baseline example configs/fixtures to demonstrate the new contracts:
+   - agent-scoped creditor/debtor + issued/received obligations views are supported,
+   - dedicated Messages section supports filtering and entity drill-through to Obligations.
+7. Fix transfer/balance correctness and ownership observability:
+   - enforce balance checks on all transfer execution paths (not only settlement autopay),
+   - emit failed transfer events with explicit failure reason for rejected transfer attempts,
+   - include source and destination ownership context in transfer events for correct Accounts attribution.
+8. Upgrade logs/interaction ergonomics for debugging scale:
+   - Pipeline/Books/Accounts rows stay compact and selectable,
+   - dedicated detail panel renders full selected-event payload,
+   - Obligations list is scrollable and visually consistent with other event/movement views,
+   - Messages controls are message-selection-scoped and disabled when correlation target is absent.
+9. Upgrade baseline example configs/fixtures to demonstrate the new contracts:
    - `configs/prototype_v3_runtime_example.yaml`
    - `tests/fixtures/v3_pipeline_full.yaml`
    - include (a) Vendor Alpha -> Scheme settlement-demand payable flow with demand issuance in Scheme Access pipeline, and (b) Vendor Alpha 2% cardholder fee flow funding the same payment source container.
    - cardholder fee statement should be modeled as non-payable/netted advisement (no cardholder payment action).
    - demonstrate distinct `invoice_issue_date` and `payment_due_date` behavior for fee statements.
+   - ensure refund generation is source-derived (from purchase-clearing behavior), not simulated via demand-side percentage scaling.
 
 **Acceptance criteria**
 - Root intent outcome follows declared routing completion modes deterministically.
@@ -115,6 +126,20 @@ Legend: `A` = Accountable, `R` = Responsible, `C` = Consulted.
 - Opposing purchase/refund settlement-demand flows are test-covered for natural directional netting without requiring formula-specific behavior.
 - UI/action contract is test-covered for entity-bound actions and agent-perspective obligations views.
 - Non-payable advisement path is test-covered (`payable=false` -> no payment action exposure, informational only).
+- Balance handling is test-covered:
+  - opening container balances,
+  - value-date-applied balance updates,
+  - insufficient-funds all-or-nothing failure semantics,
+  - deterministic autopay ordering under shared-container contention.
+- Messages view is test-covered for informational rendering, filters, and entity drill-through without direct action execution.
+- Transfer observability is test-covered:
+  - failed transfer emits `value_transfer_event` with explicit failure reason,
+  - transfer payload includes both source and destination ownership fields,
+  - Accounts attribution matches destination ownership rather than payer-only ownership.
+- TUI operability is test-covered:
+  - Obligations list scrollability + selection styling,
+  - message control disable/enable behavior by selected-message correlation,
+  - log-row selection plus detail-pane rendering for Pipeline/Books/Accounts.
 
 ---
 

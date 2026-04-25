@@ -22,6 +22,7 @@ from datetime import datetime
 from typing import Any
 
 import httpx
+from typing import Optional
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
 from textual.reactive import reactive
@@ -177,6 +178,16 @@ class MogulApp(App):
     #run-strip .world-btn {
         width: 22;
     }
+    .obligations-controls-row, .obligations-actions-row,
+    .messages-filters-row, .messages-actions-row {
+        height: auto;
+        margin: 0 0 1 0;
+    }
+    .obligations-list, #messages-list {
+        height: 1fr;
+        border: solid $surface;
+        padding: 0 1;
+    }
     """
 
     # Keyboard shortcuts per spec 60 §Accessibility: quick-focus shortcuts for
@@ -189,12 +200,15 @@ class MogulApp(App):
         ("ctrl+n", "next_day", "Next Day"),
         ("ctrl+d", "shutdown_server", "Shutdown server"),
         # Spec 60 §Minimum navigation contract: Run / World / Pipeline / Books /
-        # Accounts / Logs. Run controls live in the always-visible strip.
+        # Accounts / Obligations / Messages / Logs. Run controls live in the
+        # always-visible strip.
         ("f1", "view_world", "World"),
         ("f2", "view_pipeline", "Pipeline"),
         ("f3", "view_books", "Books"),
         ("f4", "view_accounts", "Accounts"),
-        ("f5", "view_logs", "Logs"),
+        ("f5", "view_obligations", "Obligations"),
+        ("f6", "view_messages", "Messages"),
+        ("f7", "view_logs", "Logs"),
         # Operator copy of log content. Mouse selection on RichLog already works
         # (ALLOW_SELECT=True); this keyboard action covers the case where the
         # terminal eats mouse drag or the user prefers keyboard-only flow.
@@ -242,6 +256,18 @@ class MogulApp(App):
         # value (updated via speed_changed event + state_snapshot).
         self._speed_multiplier: float = 1.0
         self._speed_cycle: tuple[float, ...] = (1.0, 2.0, 3.0)
+        # v4 Obligations + Messages state.
+        # _invoices: invoice_id -> dict payload from invoice_transaction_event.
+        # _resolutions: invoice_id -> resolution dict (post-settlement).
+        # _messages: list of operator_message_event dicts with local `read`.
+        # _obligations_selected_entity: (entity_type, entity_id) for actions.
+        self._invoices: dict[str, dict] = {}
+        self._resolutions: dict[str, dict] = {}
+        self._messages: list[dict] = []
+        self._obligations_selected_entity: Optional[tuple[str, str]] = None
+        self._messages_selected_id: Optional[str] = None
+        # Known agent ids for obligation/message selectors.
+        self._known_agent_ids: list[str] = []
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -316,7 +342,79 @@ class MogulApp(App):
                         classes="log-hint",
                     )
                     yield SelectableRichLog(id="accounts-log", highlight=True, markup=True, auto_scroll=True)
-            with TabPane("Logs [F5]", id="tab-logs"):
+            # Spec 60 §View E — Obligations (agent-scoped invoices + demands).
+            with TabPane("Obligations [F5]", id="tab-obligations"):
+                with Vertical(classes="tab-pane-content"):
+                    yield Label("[bold]Agent-scoped obligations[/] — creditor/debtor perspectives, issued/received queues")
+                    with Horizontal(classes="obligations-controls-row"):
+                        yield Select(
+                            options=[("(no agent)", "__none__")],
+                            prompt="Agent",
+                            id="obligations-agent-select",
+                            allow_blank=False,
+                        )
+                        yield Select(
+                            options=[("Creditor", "creditor"), ("Debtor", "debtor")],
+                            prompt="Perspective",
+                            id="obligations-role-select",
+                            value="creditor",
+                            allow_blank=False,
+                        )
+                        yield Select(
+                            options=[("Issued", "issued"), ("Received", "received")],
+                            prompt="Queue",
+                            id="obligations-queue-select",
+                            value="issued",
+                            allow_blank=False,
+                        )
+                    yield Label("── Invoices (fee + settlement_demand) ──")
+                    yield Static("(no invoices yet)", id="obligations-invoices", classes="obligations-list")
+                    yield Label("── Selected entity actions ──")
+                    yield Static(
+                        "[dim]Click a row's entity id above to select; "
+                        "non-payable entities do not expose payment actions.[/]",
+                        id="obligations-selection-hint",
+                    )
+                    with Horizontal(classes="obligations-actions-row"):
+                        yield Button("Pay Now", id="btn-pay-now", variant="success")
+                        yield Button("Hold", id="btn-hold", variant="warning")
+                        yield Button("Release Hold", id="btn-release-hold", variant="primary")
+                    yield Label("Selected entity:")
+                    yield Static("(none)", id="obligations-selected-entity")
+            # Spec 60 §View F — Messages (operator attention queue).
+            with TabPane("Messages [F6]", id="tab-messages"):
+                with Vertical(classes="tab-pane-content"):
+                    yield Label("[bold]Operator Messages[/] — informational; actions are entity-bound in Obligations")
+                    with Horizontal(classes="messages-filters-row"):
+                        yield Select(
+                            options=[("All", "__all__"),
+                                     ("info", "info"),
+                                     ("warning", "warning"),
+                                     ("critical", "critical")],
+                            prompt="Severity",
+                            id="messages-severity-select",
+                            value="__all__",
+                            allow_blank=False,
+                        )
+                        yield Select(
+                            options=[("All agents", "__all__")],
+                            prompt="Agent",
+                            id="messages-agent-select",
+                            value="__all__",
+                            allow_blank=False,
+                        )
+                        yield Select(
+                            options=[("All", "all"), ("Unread", "unread")],
+                            prompt="Read state",
+                            id="messages-read-select",
+                            value="all",
+                            allow_blank=False,
+                        )
+                    yield Static("(no messages yet)", id="messages-list")
+                    with Horizontal(classes="messages-actions-row"):
+                        yield Button("Mark read", id="btn-messages-mark-read", variant="primary")
+                        yield Button("Open in Obligations", id="btn-messages-drill", variant="success")
+            with TabPane("Logs [F7]", id="tab-logs"):
                 with Vertical(classes="tab-pane-content"):
                     yield Label("── Recent Events ──")
                     yield Static(
@@ -696,28 +794,61 @@ class MogulApp(App):
             )
             self._record_account_movement(data)
         elif event_type == "invoice_transaction_event":
+            # v4: route to obligations state, pipeline log, and books log.
+            self._invoices[data["invoice_id"]] = data
             self._log_pipeline(
-                f"[bold yellow]invoice[/] T{data.get('tick_id')} due={data.get('simulation_date')} "
-                f"id={data.get('invoice_id')} fee={data.get('fee_id')} "
-                f"amt={self._fmt_amount(data.get('amount'))} status={data.get('status')}"
+                f"[bold yellow]invoice[/] T{data.get('tick_id')} "
+                f"date={data.get('simulation_date')} "
+                f"id={data.get('invoice_id')} category={data.get('invoice_category', 'fee')} "
+                f"amt={self._fmt_amount(data.get('amount'))} "
+                f"payable={data.get('payable', True)} status={data.get('status')}"
             )
+            self._refresh_obligations()
         # ---- Books tab events (spec 60 §View C — ledger hierarchy) ----
         elif event_type == "posting_entry_event":
             self._log_books(
                 f"[cyan]post[/] T{data.get('tick_id')} prof={data.get('pipeline_profile_id')} "
                 f"id={data.get('posting_id')} trig={data.get('trigger_id')} "
                 f"{data.get('source_ledger_path')} -> {data.get('destination_ledger_path')} "
-                f"amt={self._fmt_amount(data.get('amount'))} "
+                f"amt={data.get('amount')} "
                 f"vd={data.get('value_date_policy')}={data.get('resolved_value_date')}"
             )
             self._record_book_movement(data)
         elif event_type == "settlement_resolution_event":
+            # v4: route to obligations state + books log.
+            self._resolutions[data["invoice_id"]] = data
             self._log_books(
                 f"[bold green]settle[/] T{data.get('tick_id')} inv={data.get('invoice_id')} "
-                f"fee={data.get('fee_id')} mode={data.get('mode')} "
+                f"category={data.get('invoice_category', 'fee')} "
+                f"mode={data.get('mode')} "
                 f"settled={self._fmt_amount(data.get('settled_amount'))} "
                 f"residual={self._fmt_amount(data.get('residual_amount'))} "
                 f"final={data.get('final_status')}"
+            )
+            self._refresh_obligations()
+        elif event_type == "settlement_demand_event":
+            self._log_pipeline(
+                f"[magenta]demand[/] {data.get('settlement_demand_id')} "
+                f"{data.get('creditor_agent_id')} <- {data.get('debtor_agent_id')} "
+                f"amt={self._fmt_amount(data.get('amount'))}"
+            )
+        elif event_type == "operator_message_event":
+            msg = dict(data)
+            msg.setdefault("read", False)
+            self._messages.append(msg)
+            severity = msg.get("severity", "info")
+            color = {"info": "cyan", "warning": "yellow", "critical": "red"}.get(severity, "cyan")
+            self._log_line(
+                f"[{color}]msg/{severity}[/] {msg.get('message_type')} "
+                f"agent={msg.get('agent_id')} entity="
+                f"{msg.get('invoice_id') or msg.get('settlement_demand_id') or '-'}"
+            )
+            self._refresh_messages()
+        elif event_type == "operator_action_ack_event":
+            self._log_line(
+                f"[cyan]action_ack[/] {data.get('action')} "
+                f"{data.get('entity_type')}={data.get('entity_id')} "
+                f"accepted={data.get('accepted')}"
             )
         elif event_type == "world_restarting":
             gen = data.get("world_generation")
@@ -835,6 +966,9 @@ class MogulApp(App):
         # Agent-controls target list — rebuild from snapshot so reloads pick up
         # new vendor/product shape (spec 51 §Agent controls requires explicit target).
         self._refresh_agent_targets(snap)
+        # v4 Obligations/Messages views reuse the same vendor roster.
+        self._refresh_agent_selectors(snap)
+        self._refresh_obligations()
 
         # Pop info
         pop_lines = []
@@ -1014,8 +1148,187 @@ class MogulApp(App):
             return None, None
 
     def on_select_changed(self, event: Select.Changed) -> None:
-        if event.select.id == "agent-target-select":
+        sid = event.select.id
+        if sid == "agent-target-select":
             self._selected_target_key = event.value  # type: ignore[assignment]
+        elif sid in ("obligations-agent-select",
+                      "obligations-role-select",
+                      "obligations-queue-select"):
+            self._refresh_obligations()
+        elif sid in ("messages-severity-select",
+                      "messages-agent-select",
+                      "messages-read-select"):
+            self._refresh_messages()
+
+    def _refresh_selection_display(self) -> None:
+        try:
+            widget = self.query_one("#obligations-selected-entity", Static)
+        except Exception:
+            return
+        if self._obligations_selected_entity is None:
+            widget.update("(none)")
+            return
+        entity_type, entity_id = self._obligations_selected_entity
+        inv = self._invoices.get(entity_id)
+        payable = inv.get("payable", True) if inv else True
+        widget.update(
+            f"{entity_type}: {entity_id}" + (" [dim](non-payable)[/]" if not payable else "")
+        )
+
+    def select_obligation_entity(self, entity_type: str, entity_id: str) -> None:
+        """Programmatic selection helper (exposed for tests + drill-through)."""
+        self._obligations_selected_entity = (entity_type, entity_id)
+        self._refresh_selection_display()
+        self._refresh_obligations()
+
+    def select_message(self, message_id: str) -> None:
+        """Programmatic selection helper (exposed for tests + drill-through)."""
+        self._messages_selected_id = message_id
+        self._refresh_messages()
+
+    # ------------------------------------------------------------------ obligations / messages (spec 60 §Views E/F)
+
+    def _refresh_obligations(self) -> None:
+        """Render the currently-filtered obligations list based on the agent
+        selector + creditor/debtor + issued/received filters.
+
+        Filtering rules (spec 60 §View E):
+        - Agent selector scopes to a single agent.
+        - role_side = creditor | debtor.
+        - queue = issued | received (for the selected agent perspective).
+          Issued: agent is on the matching side (e.g. creditor-issued means
+          invoices where agent is creditor AND agent is the invoice's issuing
+          perspective). For our single-product issuer model we treat "issued"
+          as invoices where the selected role_side matches the agent and the
+          payer is a DIFFERENT agent; "received" is the flip.
+        """
+        try:
+            widget = self.query_one("#obligations-invoices", Static)
+            agent_sel = self.query_one("#obligations-agent-select", Select)
+            role_sel = self.query_one("#obligations-role-select", Select)
+            queue_sel = self.query_one("#obligations-queue-select", Select)
+        except Exception:
+            return
+        agent_id = agent_sel.value
+        role_side = role_sel.value or "creditor"
+        queue = queue_sel.value or "issued"
+
+        matching: list[dict] = []
+        for inv in sorted(self._invoices.values(),
+                          key=lambda d: (d.get("invoice_issue_date", ""),
+                                          d.get("invoice_id", ""))):
+            if not agent_id or agent_id == "__none__":
+                continue
+            creditor = inv.get("creditor_agent_id")
+            debtor = inv.get("debtor_agent_id")
+            if role_side == "creditor":
+                if queue == "issued":
+                    # Agent is the creditor.
+                    if creditor != agent_id:
+                        continue
+                else:
+                    # "received" from creditor perspective — when this
+                    # agent is receiving a statement as a creditor from
+                    # another creditor doesn't really happen; we show nothing.
+                    if creditor != agent_id or debtor == agent_id:
+                        continue
+            else:  # debtor
+                if queue == "issued":
+                    # Demand issued by agent as debtor (rare; sinks issuing
+                    # credits to others). Usually empty.
+                    if debtor != agent_id or creditor == agent_id:
+                        continue
+                else:
+                    # Received as debtor = invoices where agent owes.
+                    if debtor != agent_id:
+                        continue
+            matching.append(inv)
+
+        if not matching:
+            widget.update("(no obligations matching current filters)")
+            return
+        lines: list[str] = []
+        for inv in matching:
+            resolution = self._resolutions.get(inv["invoice_id"])
+            if resolution:
+                status = resolution.get("final_status", "?")
+            else:
+                status = inv.get("settlement_status", "pending")
+            payable_mark = " [dim](non-payable)[/]" if not inv.get("payable", True) else ""
+            selected_mark = ""
+            if self._obligations_selected_entity == (
+                "invoice", inv["invoice_id"]):
+                selected_mark = " [reverse]◀ SELECTED[/]"
+            lines.append(
+                f"{inv['invoice_id']} · {inv['invoice_category']} · "
+                f"{self._fmt_amount(inv.get('amount'))} · "
+                f"issue={inv.get('invoice_issue_date')} "
+                f"due={inv.get('payment_due_date')} "
+                f"status=[{status}]{payable_mark}{selected_mark}"
+            )
+        widget.update("\n".join(lines))
+
+    def _refresh_messages(self) -> None:
+        try:
+            widget = self.query_one("#messages-list", Static)
+            sev_sel = self.query_one("#messages-severity-select", Select)
+            agent_sel = self.query_one("#messages-agent-select", Select)
+            read_sel = self.query_one("#messages-read-select", Select)
+        except Exception:
+            return
+        severity_filter = sev_sel.value
+        agent_filter = agent_sel.value
+        read_filter = read_sel.value  # "all" | "unread"
+
+        lines: list[str] = []
+        for msg in self._messages:
+            if severity_filter and severity_filter != "__all__":
+                if msg.get("severity") != severity_filter:
+                    continue
+            if agent_filter and agent_filter != "__all__":
+                if msg.get("agent_id") != agent_filter:
+                    continue
+            if read_filter == "unread" and msg.get("read"):
+                continue
+            severity = msg.get("severity", "info")
+            color = {"info": "cyan", "warning": "yellow", "critical": "red"}.get(severity, "cyan")
+            correlated = msg.get("invoice_id") or msg.get("settlement_demand_id") or "-"
+            read_mark = " [dim](read)[/]" if msg.get("read") else ""
+            sel_mark = (" [reverse]◀ SELECTED[/]"
+                        if msg.get("message_id") == self._messages_selected_id
+                        else "")
+            lines.append(
+                f"[{color}]{severity}[/] {msg.get('message_type')} "
+                f"agent={msg.get('agent_id')} entity={correlated} "
+                f"· {msg.get('body', '')}{read_mark}{sel_mark}"
+            )
+        if not lines:
+            widget.update("(no messages matching current filters)")
+            return
+        widget.update("\n".join(lines))
+
+    def _refresh_agent_selectors(self, snap: dict) -> None:
+        """Populate obligation + message agent filters from snapshot vendors."""
+        agents = sorted(snap.get("vendors", {}).keys())
+        if agents == self._known_agent_ids:
+            return
+        self._known_agent_ids = agents
+        try:
+            ob_sel = self.query_one("#obligations-agent-select", Select)
+            ob_options = [(a, a) for a in agents] or [("(no agent)", "__none__")]
+            ob_sel.set_options(ob_options)
+            if ob_sel.value in {"__none__", None} and agents:
+                ob_sel.value = agents[0]
+        except Exception:
+            pass
+        try:
+            msg_sel = self.query_one("#messages-agent-select", Select)
+            msg_options = [("All agents", "__all__")] + [(a, a) for a in agents]
+            msg_sel.set_options(msg_options)
+            if msg_sel.value is None:
+                msg_sel.value = "__all__"
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ speed display
 
@@ -1075,6 +1388,62 @@ class MogulApp(App):
                     nxt = cycle[0]
                 r = await self._http.post("/control/speed", json={"multiplier": nxt})
                 self._log_control_response("speed", r)
+            elif bid in ("btn-pay-now", "btn-hold", "btn-release-hold"):
+                # Spec 33 §Operator action binding: actions target invoice_id /
+                # settlement_demand_id. TUI uses the locally-selected entity.
+                sel = self._obligations_selected_entity
+                if sel is None:
+                    self._log_line(
+                        "[red]action rejected locally: no entity selected (spec 33)[/]"
+                    )
+                    return
+                entity_type, entity_id = sel
+                action_route = {
+                    "btn-pay-now": "pay_now",
+                    "btn-hold": "hold",
+                    "btn-release-hold": "release_hold",
+                }[bid]
+                # Enforce non-payable rule client-side too (spec 60 §View E).
+                inv = self._invoices.get(entity_id)
+                if inv is not None and not inv.get("payable", True):
+                    self._log_line(
+                        "[red]action rejected locally: entity is non-payable[/]"
+                    )
+                    return
+                await self._http.post(f"/actions/{action_route}", json={
+                    "entity_type": entity_type,
+                    "entity_id": entity_id,
+                })
+            elif bid == "btn-messages-mark-read":
+                if self._messages_selected_id is None:
+                    return
+                for msg in self._messages:
+                    if msg.get("message_id") == self._messages_selected_id:
+                        msg["read"] = True
+                self._refresh_messages()
+            elif bid == "btn-messages-drill":
+                # Drill-through: select the correlated entity in Obligations
+                # (spec 60 §View F: "drill-through from correlated message to
+                # Obligations view with referenced entity pre-selected").
+                sel_msg = None
+                for msg in self._messages:
+                    if msg.get("message_id") == self._messages_selected_id:
+                        sel_msg = msg
+                        break
+                if sel_msg is None:
+                    return
+                eid = sel_msg.get("invoice_id") or sel_msg.get("settlement_demand_id")
+                if eid is None:
+                    self._log_line(
+                        "[yellow]message has no correlated obligation entity[/]"
+                    )
+                    return
+                entity_type = "invoice" if sel_msg.get("invoice_id") else "settlement_demand"
+                self._obligations_selected_entity = (entity_type, eid)
+                # Switch tab to Obligations + refresh.
+                self._switch_tab("tab-obligations")
+                self._refresh_selection_display()
+                self._refresh_obligations()
             elif bid in ("btn-open-ob", "btn-close-ob", "btn-open-tx", "btn-close-tx"):
                 ctype = {
                     "btn-open-ob": "OpenOnboarding",
@@ -1167,6 +1536,12 @@ class MogulApp(App):
 
     def action_view_accounts(self) -> None:
         self._switch_tab("tab-accounts")
+
+    def action_view_obligations(self) -> None:
+        self._switch_tab("tab-obligations")
+
+    def action_view_messages(self) -> None:
+        self._switch_tab("tab-messages")
 
     def action_view_logs(self) -> None:
         self._switch_tab("tab-logs")

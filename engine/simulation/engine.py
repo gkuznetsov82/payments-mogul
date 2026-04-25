@@ -304,6 +304,76 @@ class SimulationEngine:
 
     # ------------------------------------------------------------------ speed control (spec 51/52/60)
 
+    # ------------------------------------------------------------------ operator actions (v4)
+
+    async def submit_operator_action(self,
+                                      action: str,
+                                      entity_type: str,
+                                      entity_id: str) -> dict:
+        """Spec 33 §Operator action binding + spec 52 §Message and action
+        acknowledgement contract. Actions target entity IDs
+        (invoice_id / settlement_demand_id), never message_id.
+
+        Emits `operator_action_ack_event` on the SSE stream so clients can
+        reflect the ack without waiting for the next snapshot.
+        """
+        if entity_type not in ("invoice", "settlement_demand"):
+            return {
+                "accepted": False,
+                "action": action,
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "rejection_reason": "invalid_entity_type",
+                "command_scope": "world",
+            }
+        if action not in ("pay_now", "hold", "release_hold"):
+            return {
+                "accepted": False,
+                "action": action,
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "rejection_reason": "invalid_action",
+                "command_scope": "world",
+            }
+        if self._pipeline_executor is None:
+            return {
+                "accepted": False,
+                "action": action,
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "rejection_reason": "pipeline_not_runtime",
+                "command_scope": "world",
+            }
+        executor = self._pipeline_executor
+        if action == "hold":
+            result = executor.request_hold(entity_id)
+        elif action == "release_hold":
+            result = executor.request_release_hold(entity_id)
+        else:  # pay_now
+            result = executor.request_pay_now(entity_id)
+        # Emit ack SSE event (spec 52 §operator_action_ack_event).
+        ack_payload = {
+            "action": action,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "accepted": result.get("accepted", False),
+            "entity_known": result.get("entity_known", False),
+            "tick_id": self.tick_id,
+            "simulation_date": self.simulation_date.isoformat(),
+        }
+        if result.get("rejection_reason"):
+            ack_payload["rejection_reason"] = result["rejection_reason"]
+        await self._emit("operator_action_ack_event", ack_payload)
+        return {
+            "accepted": result.get("accepted", False),
+            "action": action,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "entity_known": result.get("entity_known", False),
+            "rejection_reason": result.get("rejection_reason"),
+            "command_scope": "world",
+        }
+
     async def set_speed(self, multiplier: float) -> dict:
         """Set wall-clock speed multiplier (spec 51 §Speed / 52 §Set speed).
 

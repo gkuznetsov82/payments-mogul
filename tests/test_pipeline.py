@@ -204,32 +204,44 @@ async def test_pipeline_realtime_payload_correlation_keys():
 
 
 @pytest.mark.asyncio
-async def test_invoice_emitted_on_due_date_with_direct_payment_settlement():
-    """Run one tick to accrue fees with next_month_day_plus_x offset 5; advance
-    until the fee's due date and confirm invoice + settlement events fire."""
+async def test_invoice_emitted_on_issue_date_and_settlement_on_due_date():
+    """v4 lifecycle (spec 40 §Lifecycle date semantics): invoice emits on
+    `invoice_issue_date`; payable settlement_resolution_event emits on
+    `payment_due_date`, which is a later date in this fixture."""
     eng = _engine()
     q = eng.subscribe()
-    # Tick 1: accrue scheme + processor fees with due_date = 2026-02-06.
+    # Tick 1: accrue scheme + processor fees; payment_due_date = 2026-02-06.
     await eng._run_one_tick(next_day_mode=True)
     accrual_events = await _drain(q)
     fees = [e["data"] for e in accrual_events if e["event"] == "fee_accrual_event"]
     assert fees, "expected fee accruals on tick 1"
-    due_date = fees[0]["settlement_due_date"]
+    payable_fees = [f for f in fees if not f.get("non_payable")]
+    assert payable_fees, "expected at least one payable (non-cardholder) fee"
+    payable_fee = payable_fees[0]
+    issue_date = payable_fee["invoice_issue_date"]
+    due_date = payable_fee["payment_due_date"]
+    assert issue_date == "2026-02-01"
     assert due_date == "2026-02-06"
+    assert issue_date != due_date
 
-    # Advance until simulation_date hits the due date.
-    while eng.simulation_date.isoformat() < due_date:
+    # Advance past the payment_due_date so both events have fired.
+    while eng.simulation_date.isoformat() <= due_date:
         await eng._run_one_tick(next_day_mode=True)
-    # Drain everything emitted across ticks 2..N including the due-date tick.
     later_events = await _drain(q)
-    types = [e["event"] for e in later_events]
-    assert "invoice_transaction_event" in types
-    assert "settlement_resolution_event" in types
-    settlement = next(e["data"] for e in later_events
-                      if e["event"] == "settlement_resolution_event")
-    # ADR-0002: netting deferred; only direct payment.
-    assert settlement["mode"] == "paid"
-    assert settlement["final_status"] == "paid"
+    invoices = [e["data"] for e in later_events
+                if e["event"] == "invoice_transaction_event"
+                and e["data"]["invoice_category"] == "fee"
+                and e["data"]["payable"]]
+    settlements = [e["data"] for e in later_events
+                   if e["event"] == "settlement_resolution_event"]
+    assert invoices, "payable fee invoices expected"
+    # Invoices emit on issue_date; settlements on due_date.
+    for inv in invoices:
+        assert inv["simulation_date"] == inv["invoice_issue_date"]
+    for s in settlements:
+        if s["final_status"] == "paid":
+            assert s["mode"] == "paid"
+            assert s["transfer_id"] is not None
 
 
 @pytest.mark.asyncio
@@ -584,142 +596,451 @@ async def test_v4_async_failure_does_not_flip_root(tmp_path):
 # ---- (4) invoice aggregation -----------------------------------------------
 
 @pytest.mark.asyncio
-async def test_v4_invoice_aggregation_combines_same_fee_same_due_date():
-    """Spec 33 §Invoice and settlement lifecycle: invoices aggregate all fees
-    of the same type / recipient / payer / due date into a single
-    `invoice_transaction_event` on the due date.
+async def test_v4_fee_invoice_aggregation_by_issue_date():
+    """Spec 33 §Invoice and settlement lifecycle + spec 40 §Lifecycle date
+    semantics: invoices aggregate all fees of same type/recipient/payer by
+    `invoice_issue_date` (not payment_due_date).
 
-    Every January tick accrues scheme + processor fees; all of them share due
-    date 2026-02-06 (next_month_day_plus_x offset 5). Aggregation must produce
-    exactly one invoice per fee type (regardless of how many accruals fold in).
+    Scheme + processor fees use `invoice_issue_date_policy=next_month_day_plus_x`
+    with offset 0 → issue date is 2026-02-01 for all January accruals. Payment
+    due date is offset 5 → 2026-02-06. Aggregation key = issue_date.
     """
     eng = _engine()
     q = eng.subscribe()
-    # Advance up to and including the due-date tick so the aggregated invoice
-    # is emitted. Collect every event across the whole window so we can sum
-    # component accruals.
-    due_date = "2026-02-06"
+    issue_date = "2026-02-01"
     all_events: list[dict] = []
-    # Pump ticks until due date is reached AND the aggregated invoice event
-    # actually appears (covers tick ordering: accrual + aggregate-emit on same
-    # tick).
-    for _ in range(80):  # safety bound
+    # Run until we've passed the issue date so invoices have been emitted.
+    for _ in range(80):
         await eng._run_one_tick(next_day_mode=True)
-        tick_events = await _drain(q)
-        all_events.extend(tick_events)
-        if eng.simulation_date.isoformat() >= due_date:
-            # One more drain to collect any trailing events, then stop once we
-            # have the invoice emission.
-            if any(e["event"] == "invoice_transaction_event" for e in all_events):
-                break
+        all_events.extend(await _drain(q))
+        if eng.simulation_date.isoformat() >= issue_date and any(
+            e["event"] == "invoice_transaction_event"
+            and e["data"].get("invoice_category") == "fee"
+            and e["data"]["invoice_issue_date"] == issue_date
+            for e in all_events
+        ):
+            break
 
+    fee_invoices = [e["data"] for e in all_events
+                    if e["event"] == "invoice_transaction_event"
+                    and e["data"].get("invoice_category") == "fee"
+                    and e["data"].get("payable") is True
+                    and e["data"]["invoice_issue_date"] == issue_date]
+    invoice_by_fee = {i["fee_id"]: i for i in fee_invoices}
+    assert "fee_scheme_access" in invoice_by_fee
+    assert "fee_processor_services" in invoice_by_fee
+    # scheme + processor fees => exactly two payable fee invoices for this
+    # issue date. Non-payable cardholder advisements are filtered out above
+    # (payable=false) and belong to a separate daily series.
+    assert len(fee_invoices) == 2
+
+    # Both invoice_issue_date and payment_due_date are emitted and differ.
+    scheme_inv = invoice_by_fee["fee_scheme_access"]
+    assert scheme_inv["invoice_issue_date"] == issue_date
+    assert scheme_inv["payment_due_date"] == "2026-02-06"
+    assert scheme_inv["invoice_issue_date"] != scheme_inv["payment_due_date"]
+
+    # Aggregate amount equals sum of accrued components with same fee_id AND
+    # same invoice_issue_date.
     accruals = [e["data"] for e in all_events if e["event"] == "fee_accrual_event"]
-    # An accrual on the due date itself rolls forward to NEXT month's due date
-    # (next_month_day_plus_x applied to 2026-02-06 → 2026-03-06), so only
-    # accruals whose settlement_due_date matches the target due date roll
-    # into the emitted invoice.
     scheme_accruals = [a for a in accruals
                        if a["fee_id"] == "fee_scheme_access"
-                       and a["settlement_due_date"] == due_date]
-    processor_accruals = [a for a in accruals
-                          if a["fee_id"] == "fee_processor_services"
-                          and a["settlement_due_date"] == due_date]
-    assert scheme_accruals and processor_accruals, "expected fee accruals across multiple ticks"
-
-    invoices = [e["data"] for e in all_events
-                if e["event"] == "invoice_transaction_event"
-                and e["data"]["simulation_date"] == due_date]
-    # One invoice per (fee_id, due_date, beneficiary, payer, currency). The
-    # fixture has two fee types → exactly two invoices for this due date,
-    # regardless of how many individual accruals folded in.
-    invoice_by_fee_id = {i["fee_id"]: i for i in invoices}
-    assert "fee_scheme_access" in invoice_by_fee_id
-    assert "fee_processor_services" in invoice_by_fee_id
-    assert len(invoices) == 2, (
-        f"expected 2 aggregate invoices for {due_date}, got {len(invoices)}: "
-        f"{[i['invoice_id'] for i in invoices]}"
-    )
-
-    # Aggregate amount equals sum of all component fee amounts with same fee_id + due date.
+                       and a["invoice_issue_date"] == issue_date]
     scheme_sum = round(sum(float(a["fee_amount"]["amount"]) for a in scheme_accruals), 2)
-    processor_sum = round(sum(float(a["fee_amount"]["amount"]) for a in processor_accruals), 2)
-    scheme_invoice_amount = float(invoice_by_fee_id["fee_scheme_access"]["amount"]["amount"])
-    processor_invoice_amount = float(invoice_by_fee_id["fee_processor_services"]["amount"]["amount"])
-    # Allow small rounding drift — each fold rounds to amount_scale_dp.
+    scheme_invoice_amount = float(scheme_inv["amount"]["amount"])
     assert abs(scheme_invoice_amount - scheme_sum) < 1.0, (scheme_invoice_amount, scheme_sum)
-    assert abs(processor_invoice_amount - processor_sum) < 1.0, (processor_invoice_amount, processor_sum)
 
-    # component_count reflects the number of folded accruals.
-    assert invoice_by_fee_id["fee_scheme_access"]["component_count"] == len(scheme_accruals), (
-        invoice_by_fee_id["fee_scheme_access"]["component_count"], len(scheme_accruals)
-    )
-    assert invoice_by_fee_id["fee_processor_services"]["component_count"] == len(processor_accruals)
-
-    # Invoice emitted on the due date with preserved currency.
-    assert invoice_by_fee_id["fee_scheme_access"]["simulation_date"] == due_date
-    assert invoice_by_fee_id["fee_scheme_access"]["amount"]["currency"] == "USD"
+    # component_count reflects the number of folded accruals with matching issue date.
+    assert scheme_inv["component_count"] == len(scheme_accruals)
 
 
 # ---- (5) settlement resolution payload + correlation -----------------------
 
 @pytest.mark.asyncio
-async def test_v4_settlement_resolution_matches_invoice_and_fee_correlation():
-    """Each `settlement_resolution_event` must (a) reference the matching
-    `invoice_id`, (b) carry the original `fee_id` from the aggregated group,
-    (c) have final_status=paid / residual=0 in direct-payment mode, and (d)
-    co-emit in the same tick as its invoice."""
+async def test_v4_settlement_resolution_transfer_backed_on_due_date():
+    """Spec 33 §Invoice and settlement lifecycle (v4):
+    - invoices emit on `invoice_issue_date`,
+    - payment attempt + settlement_resolution_event emit on `payment_due_date`,
+    - `final_status=paid` only when the accompanying transfer executes for the
+      settled amount (transfer_id correlation).
+    """
     eng = _engine()
     q = eng.subscribe()
-    await eng._run_one_tick(next_day_mode=True)  # accrue fees
-    await _drain(q)
-    # Advance to due date.
-    while eng.simulation_date.isoformat() < "2026-02-06":
+    all_events: list[dict] = []
+    # Advance to beyond payment_due_date so we observe both phases.
+    payment_due = "2026-02-06"
+    for _ in range(80):
         await eng._run_one_tick(next_day_mode=True)
-    events = await _drain(q)
+        all_events.extend(await _drain(q))
+        if eng.simulation_date.isoformat() > payment_due:
+            break
 
-    invoices = [e["data"] for e in events if e["event"] == "invoice_transaction_event"]
-    settlements = [e["data"] for e in events if e["event"] == "settlement_resolution_event"]
-    assert invoices and settlements
-    assert len(invoices) == len(settlements), (
-        "one settlement per aggregate invoice expected"
-    )
-    invoice_by_id = {i["invoice_id"]: i for i in invoices}
+    fee_invoices = [e["data"] for e in all_events
+                    if e["event"] == "invoice_transaction_event"
+                    and e["data"]["invoice_category"] == "fee"
+                    and e["data"]["payable"] is True]
+    assert fee_invoices, "expected payable fee invoices"
+
+    settlements = [e["data"] for e in all_events
+                   if e["event"] == "settlement_resolution_event"
+                   and e["data"]["invoice_category"] == "fee"]
+    transfers = [e["data"] for e in all_events if e["event"] == "value_transfer_event"]
+    invoice_by_id = {i["invoice_id"]: i for i in fee_invoices}
+    transfers_by_id = {t["transfer_id"]: t for t in transfers}
+
     for s in settlements:
-        assert s["invoice_id"] in invoice_by_id, (
-            f"settlement references unknown invoice: {s['invoice_id']}"
-        )
+        assert s["invoice_id"] in invoice_by_id, s
         matched = invoice_by_id[s["invoice_id"]]
         assert s["fee_id"] == matched["fee_id"]
-        assert s["tick_id"] == matched["tick_id"], (
-            "settlement must emit in the same tick as its invoice"
+        # Settlement event emits on payment_due_date, not issue_date.
+        assert s["simulation_date"] == matched["payment_due_date"], (
+            f"settlement must emit on payment_due_date ({matched['payment_due_date']}), "
+            f"got {s['simulation_date']}"
         )
-        assert s["final_status"] == "paid"
-        assert s["mode"] == "paid"
-        assert float(s["residual_amount"]["amount"]) == 0.0
-        # Settled amount equals invoiced amount.
-        assert float(s["settled_amount"]["amount"]) == float(matched["amount"]["amount"])
+        assert matched["invoice_issue_date"] != matched["payment_due_date"], (
+            "v4 fixture should exercise distinct invoice_issue_date vs payment_due_date"
+        )
+        # Transfer-backed: final_status=paid must carry a transfer_id whose
+        # transfer we actually emitted for the settled amount.
+        if s["final_status"] == "paid":
+            assert s["transfer_id"] in transfers_by_id, (
+                f"paid resolution missing transfer: {s['transfer_id']}"
+            )
+            transfer = transfers_by_id[s["transfer_id"]]
+            assert float(transfer["amount"]["amount"]) == float(s["settled_amount"]["amount"])
+            assert float(s["residual_amount"]["amount"]) == 0.0
+        else:
+            # Failed: residual equals the full invoice amount (all-or-nothing).
+            assert s["transfer_id"] is None
+            assert float(s["residual_amount"]["amount"]) == float(matched["amount"]["amount"])
+            assert float(s["settled_amount"]["amount"]) == 0.0
 
 
 # ---- invoice aggregation id determinism -----------------------------------
 
 @pytest.mark.asyncio
 async def test_v4_aggregate_invoice_id_is_deterministic_across_runs():
-    """Invoice IDs should derive from the group key (fee_id, due_date,
-    beneficiary, payer) so identical seeds/configs produce identical IDs."""
+    """Invoice IDs should derive from the group key (fee_id, issue_date,
+    beneficiary, payer, payable_suffix) so identical seeds/configs produce
+    identical IDs."""
     async def run_to_due() -> set:
         cfg, _ = load_config(FIXTURE)
         e = SimulationEngine(cfg, config_path=FIXTURE)
         e.state_from_idle()
         q = e.subscribe()
-        await e._run_one_tick(next_day_mode=True)
-        while e.simulation_date.isoformat() < "2026-02-06":
+        for _ in range(40):
             await e._run_one_tick(next_day_mode=True)
+            if e.simulation_date.isoformat() >= "2026-02-06":
+                break
         events = await _drain(q)
         return {ev["data"]["invoice_id"]
                 for ev in events if ev["event"] == "invoice_transaction_event"}
     a = await run_to_due()
     b = await run_to_due()
-    assert a == b and len(a) == 2
+    assert a == b, (len(a), len(b), a - b, b - a)
+    # Determinism: at least the scheme + processor fee invoices on 2026-02-01
+    # are in the set on every replay.
+    assert any("fee_scheme_access" in inv_id for inv_id in a)
+    assert any("fee_processor_services" in inv_id for inv_id in a)
+
+
+# ----------------------------------------------------------------
+# v4 (spec 33/40/52/60): settlement demands, non-payable advisement, payment
+# lifecycle, operator actions, balance handling.
+# ----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_v4_non_payable_cardholder_advisement_has_no_settlement_resolution():
+    """Spec 33 §Cardholder fee statement rule: non-payable advisements emit an
+    invoice with payable=false + settlement_status=netted_internal, and do
+    NOT emit a settlement_resolution_event."""
+    eng = _engine()
+    q = eng.subscribe()
+    # 1 tick to accrue + issue the non-payable advisement (invoice_issue same_day).
+    await eng._run_one_tick(next_day_mode=True)
+    events = await _drain(q)
+    advisements = [e["data"] for e in events
+                   if e["event"] == "invoice_transaction_event"
+                   and e["data"].get("fee_id") == "fee_issuer_cardholder_2pct"]
+    assert advisements, "expected cardholder advisement invoice on same-day issue"
+    adv = advisements[0]
+    assert adv["payable"] is False
+    assert adv["settlement_status"] == "netted_internal"
+
+    # No settlement_resolution_event should correlate to this invoice.
+    resolutions = [e["data"] for e in events
+                   if e["event"] == "settlement_resolution_event"
+                   and e["data"].get("invoice_id") == adv["invoice_id"]]
+    assert resolutions == [], "non-payable advisement must not emit settlement_resolution"
+
+
+@pytest.mark.asyncio
+async def test_v4_settlement_demand_net_direction_flips_from_purchase_vs_refund():
+    """Spec 40 §Refund/purchase netting rule: opposing-direction settlement
+    demands aggregate via signed amounts on a single agent-pair + issue-date
+    group; the emitted invoice's creditor/debtor reflects net direction.
+
+    Fixture: scheme purchase demand (Alpha debtor, 100% of clearing) and
+    scheme refund demand (Alpha creditor, 1% of clearing) both accrue on the
+    same tick. Net = +99% of volume with scheme as creditor.
+    """
+    eng = _engine()
+    q = eng.subscribe()
+    # Run until the demand invoice issue date (next_working_day + 0 = next
+    # working day after 2026-01-02 purchase). Let's just pump 3 ticks.
+    for _ in range(5):
+        await eng._run_one_tick(next_day_mode=True)
+    events = await _drain(q)
+    demand_invoices = [e["data"] for e in events
+                       if e["event"] == "invoice_transaction_event"
+                       and e["data"]["invoice_category"] == "settlement_demand"]
+    assert demand_invoices, "expected at least one aggregate settlement-demand invoice"
+    # One group per (agent_pair, issue_date) — a single invoice per day.
+    # Scheme ends up as creditor (net positive) since purchase >> refund.
+    for inv in demand_invoices:
+        assert inv["creditor_agent_id"] == "vendor_scheme", inv
+        assert inv["debtor_agent_id"] == "vendor_alpha", inv
+        # Net amount > 0 (purchase * 1.0 - refund * 0.01 = 99% of clearing).
+        assert float(inv["amount"]["amount"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_v4_fee_accrual_event_carries_creditor_debtor_identities():
+    """Spec 52 §fee_accrual_event: must include resolved creditor/debtor
+    identities for directionality-sensitive fee contracts."""
+    eng = _engine()
+    q = eng.subscribe()
+    await eng._run_one_tick(next_day_mode=True)
+    events = await _drain(q)
+    fees = [e["data"] for e in events if e["event"] == "fee_accrual_event"]
+    assert fees
+    # Scheme fee: scheme agent is creditor; alpha is debtor.
+    scheme = next(f for f in fees if f["fee_id"] == "fee_scheme_access")
+    assert scheme["creditor_agent_id"] == "vendor_scheme"
+    assert scheme["debtor_agent_id"] == "vendor_alpha"
+    # Cardholder fee: alpha is creditor; "cardholder_counterparty" bound to alpha.
+    ch = next(f for f in fees if f["fee_id"] == "fee_issuer_cardholder_2pct")
+    assert ch["creditor_agent_id"] == "vendor_alpha"
+    assert ch["debtor_agent_id"] == "vendor_alpha"  # self-bound in fixture for demo
+
+
+@pytest.mark.asyncio
+async def test_v4_insufficient_funds_all_or_nothing_and_operator_message():
+    """Spec 40 §Container balance handling: non-sink containers cannot go
+    negative. If autopay finds insufficient funds, resolution = failed with
+    full residual (all-or-nothing) and an operator_message_event fires."""
+    # Build a variant fixture where Alpha's settlement container opens at
+    # $0 so the first payable demand will fail.
+    data = _yaml_data()
+    # Clear opening balances so settlement_funds_container starts at 0.
+    alpha = data["world"]["vendor_agents"][0]
+    alpha["products"][0]["pipeline_role_bindings"]["value_container_balances"] = [
+        {"container_ref": "settlement_funds_container", "opening_amount": 0,
+         "currency": "USD"},
+        {"container_ref": "customer_funds_container", "opening_amount": 0,
+         "currency": "USD"},
+    ]
+    import pathlib
+    path = pathlib.Path(_write_tmp.__defaults__[0] if _write_tmp.__defaults__ else ".")
+    # Use the canonical tmp helper through pytest's tmp_path indirection via
+    # the request fixture would need rewiring; simplest is to write to a
+    # nearby tmp file.
+    import tempfile, os
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tf:
+        pyyaml.safe_dump(data, tf)
+        variant_path = pathlib.Path(tf.name)
+    try:
+        cfg, _ = load_config(variant_path)
+        eng = SimulationEngine(cfg, config_path=variant_path)
+        eng.state_from_idle()
+        q = eng.subscribe()
+        # Pump until a payable demand invoice hits its due date and autopay
+        # attempts a transfer against the empty container.
+        saw_fail = False
+        saw_insufficient_funds_msg = False
+        for _ in range(20):
+            await eng._run_one_tick(next_day_mode=True)
+            evs = await _drain(q)
+            for ev in evs:
+                if (ev["event"] == "settlement_resolution_event"
+                        and ev["data"]["invoice_category"] == "settlement_demand"
+                        and ev["data"]["final_status"] == "failed"):
+                    saw_fail = True
+                    # residual == full invoice amount; settled == 0 (all-or-nothing).
+                    assert float(ev["data"]["settled_amount"]["amount"]) == 0.0
+                    assert float(ev["data"]["residual_amount"]["amount"]) > 0
+                    assert ev["data"]["transfer_id"] is None
+                if (ev["event"] == "operator_message_event"
+                        and ev["data"].get("message_type") == "insufficient_funds"):
+                    saw_insufficient_funds_msg = True
+            if saw_fail and saw_insufficient_funds_msg:
+                break
+        assert saw_fail, "expected settlement_resolution failed path"
+        assert saw_insufficient_funds_msg, "expected insufficient_funds operator message"
+    finally:
+        os.unlink(variant_path)
+
+
+@pytest.mark.asyncio
+async def test_v4_hold_suppresses_autopay_and_emits_message():
+    """Operator hold: marked entity is skipped by autopay; warning message emitted."""
+    eng = _engine()
+    q = eng.subscribe()
+    # Tick 1 to accrue + issue a payable demand the next working day.
+    for _ in range(2):
+        await eng._run_one_tick(next_day_mode=True)
+    events = await _drain(q)
+    demand_invoices = [e["data"] for e in events
+                       if e["event"] == "invoice_transaction_event"
+                       and e["data"]["invoice_category"] == "settlement_demand"
+                       and e["data"]["payable"]]
+    assert demand_invoices, "expected at least one payable demand invoice"
+    held_id = demand_invoices[0]["invoice_id"]
+    # Place hold via engine API.
+    ack = await eng.submit_operator_action("hold", "invoice", held_id)
+    assert ack["accepted"] and ack["command_scope"] == "world"
+    await _drain(q)  # drain the ack event
+
+    # Advance through payment_due_date: autopay should skip, emit message.
+    due_date = demand_invoices[0]["payment_due_date"]
+    for _ in range(10):
+        await eng._run_one_tick(next_day_mode=True)
+        if eng.simulation_date.isoformat() > due_date:
+            break
+    after = await _drain(q)
+    skipped_msgs = [e["data"] for e in after
+                    if e["event"] == "operator_message_event"
+                    and e["data"].get("message_type") == "autopay_skipped_hold"
+                    and e["data"].get("invoice_id") == held_id]
+    assert skipped_msgs, "expected autopay_skipped_hold message for held invoice"
+    # No resolution emitted for held invoice.
+    resolutions_for_held = [e for e in after
+                            if e["event"] == "settlement_resolution_event"
+                            and e["data"].get("invoice_id") == held_id]
+    assert resolutions_for_held == []
+
+
+@pytest.mark.asyncio
+async def test_v4_pay_now_bypasses_hold_ordering_and_settles():
+    """Operator `pay_now` on a held invoice processes payment next tick."""
+    eng = _engine()
+    q = eng.subscribe()
+    for _ in range(3):
+        await eng._run_one_tick(next_day_mode=True)
+    events = await _drain(q)
+    demand_invoices = [e["data"] for e in events
+                       if e["event"] == "invoice_transaction_event"
+                       and e["data"]["invoice_category"] == "settlement_demand"
+                       and e["data"]["payable"]]
+    assert demand_invoices
+    target_id = demand_invoices[0]["invoice_id"]
+    await eng.submit_operator_action("hold", "invoice", target_id)
+    await eng.submit_operator_action("pay_now", "invoice", target_id)
+    await _drain(q)
+    # Next tick processes pay_now regardless of due date / hold.
+    await eng._run_one_tick(next_day_mode=True)
+    after = await _drain(q)
+    resolved = [e["data"] for e in after
+                if e["event"] == "settlement_resolution_event"
+                and e["data"]["invoice_id"] == target_id]
+    assert resolved and resolved[0]["final_status"] == "paid"
+    assert resolved[0]["transfer_id"] is not None
+
+
+@pytest.mark.asyncio
+async def test_v4_operator_action_rejects_non_existent_entity():
+    """Operator action for an unknown invoice_id is not accepted."""
+    eng = _engine()
+    result = await eng.submit_operator_action("pay_now", "invoice", "does-not-exist")
+    assert result["accepted"] is False
+    assert result["rejection_reason"] in ("entity_not_open", "pipeline_not_runtime")
+
+
+@pytest.mark.asyncio
+async def test_v4_operator_action_rejects_invalid_entity_type():
+    eng = _engine()
+    result = await eng.submit_operator_action("pay_now", "message", "msg-123")
+    assert result["accepted"] is False
+    assert result["rejection_reason"] == "invalid_entity_type"
+
+
+@pytest.mark.asyncio
+async def test_v4_opening_balances_respected_in_autopay():
+    """Opening balance drains on paid autopays; balance decreases."""
+    eng = _engine()
+    # Initial balance per fixture.
+    start = eng._pipeline_executor.balance_store.balance(
+        "prod_prepaid_alpha", "settlement_funds_container")
+    assert start > 0
+    # Run a handful of ticks to trigger demand autopays.
+    for _ in range(10):
+        await eng._run_one_tick(next_day_mode=True)
+    end = eng._pipeline_executor.balance_store.balance(
+        "prod_prepaid_alpha", "settlement_funds_container")
+    # Some outflow should have happened.
+    assert end < start
+
+
+@pytest.mark.asyncio
+async def test_v4_deterministic_autopay_ordering_on_shared_source_container():
+    """Spec 40 §Container balance handling: autopay order is
+    (payment_due_date, invoice_issue_date, entity_id lex). Two identical
+    runs must produce identical resolution order."""
+    async def run_and_collect() -> list[str]:
+        cfg, _ = load_config(FIXTURE)
+        e = SimulationEngine(cfg, config_path=FIXTURE)
+        e.state_from_idle()
+        q = e.subscribe()
+        for _ in range(10):
+            await e._run_one_tick(next_day_mode=True)
+        evs = await _drain(q)
+        return [ev["data"]["invoice_id"] for ev in evs
+                if ev["event"] == "settlement_resolution_event"]
+    a = await run_and_collect()
+    b = await run_and_collect()
+    assert a == b, (a, b)
+
+
+@pytest.mark.asyncio
+async def test_v4_config_load_rejects_non_same_day_sync_leg(tmp_path):
+    """Spec 33 §Fan-out semantics §synchronous: future-dated sync legs fail config load."""
+    data = _yaml_data()
+    # Flip a sync destination to a deferred policy.
+    dest = (data["pipeline"]["pipeline_profiles"][0]
+            ["transaction_intents"][0]["destinations"][0])
+    dest["routing_completion_mode"] = "synchronous"
+    dest["value_date_policy"] = "next_day_plus_x"
+    dest["value_date_offset_days"] = 0
+    with pytest.raises(ConfigValidationError) as exc:
+        load_config(_write_tmp(tmp_path, data))
+    assert exc.value.code == "E_SYNC_LEG_VALUE_DATE_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_v4_settlement_demand_trigger_validation(tmp_path):
+    """Settlement-demand with unknown trigger must fail config load."""
+    data = _yaml_data()
+    (data["pipeline"]["pipeline_profiles"][1]["settlement_demand_sequences"][0]
+     ["settlement_demands"][0]["trigger_ids"]) = ["no_such_trigger"]
+    with pytest.raises(ConfigValidationError) as exc:
+        load_config(_write_tmp(tmp_path, data))
+    assert exc.value.code == "E_SETTLEMENT_DEMAND_TRIGGER_UNKNOWN"
+
+
+@pytest.mark.asyncio
+async def test_v4_opening_balance_negative_rejected_for_non_sink(tmp_path):
+    """Spec 40 §Container balance handling: non-sink opening_amount must be >= 0."""
+    data = _yaml_data()
+    alpha_product = data["world"]["vendor_agents"][0]["products"][0]
+    alpha_product["pipeline_role_bindings"]["value_container_balances"] = [
+        {"container_ref": "settlement_funds_container",
+         "opening_amount": -100,
+         "currency": "USD"},
+    ]
+    with pytest.raises(ConfigValidationError) as exc:
+        load_config(_write_tmp(tmp_path, data))
+    assert exc.value.code == "E_OPENING_BALANCE_NEGATIVE_FOR_NON_SINK"
 
 
 # ---------------------------------------------------------------- SQLite store

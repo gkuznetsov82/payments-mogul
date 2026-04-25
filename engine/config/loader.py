@@ -372,6 +372,43 @@ def _validate_pipeline_contracts(cfg: PrototypeConfig) -> None:
                             )
                     seen_in_seq.add(fee.fee_id)
 
+            # Settlement-demand triggers (spec 40 §settlement_demand_sequences):
+            # may reference any intent/outgoing-intent id or a prior settlement
+            # demand in the same sequence. Cross-sequence fee ids are not valid
+            # triggers for demands (spec wording: "transaction intent IDs and/or
+            # prior settlement-demand IDs").
+            for seq in prof.settlement_demand_sequences:
+                seen_demand_ids: set[str] = set()
+                for demand in seq.settlement_demands:
+                    valid_triggers = (
+                        all_intent_ids
+                        | all_outgoing_ids
+                        | seen_demand_ids
+                    )
+                    for tid in demand.trigger_ids:
+                        if tid not in valid_triggers:
+                            raise ConfigValidationError(
+                                "E_SETTLEMENT_DEMAND_TRIGGER_UNKNOWN",
+                                f"Profile '{prof.pipeline_profile_id}' settlement demand "
+                                f"'{demand.settlement_demand_id}' references unknown "
+                                f"trigger '{tid}'",
+                                "pipeline.pipeline_profiles[].settlement_demand_sequences[]"
+                                ".settlement_demands[].trigger_ids",
+                            )
+                    seen_demand_ids.add(demand.settlement_demand_id)
+
+            # Settlement payment policy source_container_ref must exist in the
+            # same profile's container construction (spec 40 §settlement_payment_policies).
+            for policy in prof.settlement_payment_policies:
+                if policy.source_container_ref not in container_refs:
+                    raise ConfigValidationError(
+                        "E_CONTAINER_REF_NOT_FOUND",
+                        f"Profile '{prof.pipeline_profile_id}': settlement_payment_policies."
+                        f"source_container_ref '{policy.source_container_ref}' not defined",
+                        "pipeline.pipeline_profiles[].settlement_payment_policies[]"
+                        ".source_container_ref",
+                    )
+
     # Per-product binding validation: pipeline_profile_id must reference a defined profile,
     # and every {role_placeholder} in path patterns / destinations must be resolvable from
     # the product's pipeline_role_bindings.
@@ -407,6 +444,14 @@ def _validate_pipeline_contracts(cfg: PrototypeConfig) -> None:
                     placeholders_seen.add(fee.beneficiary_role)
                     if fee.beneficiary_product_role:
                         placeholders_seen.add(fee.beneficiary_product_role)
+                    if fee.payer_role:
+                        placeholders_seen.add(fee.payer_role)
+            # Spec 40 §settlement_demand_sequences: creditor/debtor roles must
+            # resolve against pipeline_role_bindings.
+            for seq in profile.settlement_demand_sequences:
+                for demand in seq.settlement_demands:
+                    placeholders_seen.add(demand.creditor_role)
+                    placeholders_seen.add(demand.debtor_role)
             unresolved = placeholders_seen - known_roles
             if unresolved:
                 raise ConfigValidationError(
@@ -416,6 +461,35 @@ def _validate_pipeline_contracts(cfg: PrototypeConfig) -> None:
                     f"not bound: {sorted(unresolved)}",
                     "world.vendor_agents[].products[].pipeline_role_bindings.entity_roles",
                 )
+
+            # Spec 40 §Container balance handling: opening balances must
+            # reference containers defined in the same profile; non-sink
+            # products cannot open negative. Sink products may.
+            if bindings is not None and bindings.value_container_balances:
+                profile_container_refs = {
+                    c.container_ref for c in profile.value_container_construction
+                }
+                is_sink = product.product_class == "SinkProduct"
+                for ob in bindings.value_container_balances:
+                    if ob.container_ref not in profile_container_refs:
+                        raise ConfigValidationError(
+                            "E_CONTAINER_REF_NOT_FOUND",
+                            f"Vendor '{vendor.vendor_id}' product '{product.product_id}': "
+                            f"value_container_balances.container_ref "
+                            f"'{ob.container_ref}' not defined in profile "
+                            f"'{product.pipeline_profile_id}'",
+                            "world.vendor_agents[].products[].pipeline_role_bindings"
+                            ".value_container_balances[].container_ref",
+                        )
+                    if not is_sink and ob.opening_amount < 0:
+                        raise ConfigValidationError(
+                            "E_OPENING_BALANCE_NEGATIVE_FOR_NON_SINK",
+                            f"Vendor '{vendor.vendor_id}' product '{product.product_id}' "
+                            f"is non-sink; opening_amount for container "
+                            f"'{ob.container_ref}' must be >= 0 (got {ob.opening_amount})",
+                            "world.vendor_agents[].products[].pipeline_role_bindings"
+                            ".value_container_balances[].opening_amount",
+                        )
 
             # If pipeline binding present but pipeline section is v2_foundations,
             # enforce config consistency: v2 profiles attached to products are

@@ -25,6 +25,17 @@ money:
 pipeline:
   pipeline_schema_version: "v3_runtime"
   pipeline_profiles:
+    # -----------------------------------------------------------------------
+    # Vendor Alpha — prepaid card issuer. V4 additions:
+    #   - routes purchase AND refund to the scheme + processor destinations
+    #     (sync, same day),
+    #   - accrues a 2% issuer-side cardholder fee modeled as a non-payable
+    #     informational statement (payable=false, netted_internal),
+    #   - declares settlement_payment_policies so Alpha can pay scheme-issued
+    #     settlement demands from its own settlement_funds container,
+    #   - opens the settlement_funds container with a non-zero balance so the
+    #     pay flow has funds to draw from.
+    # -----------------------------------------------------------------------
     - pipeline_profile_id: "prepaid_card_pipeline"
       transaction_intents:
         - intent_id: "Transact-Purchase-Clearing"
@@ -35,12 +46,30 @@ pipeline:
               value_date_offset_days: 0
               amount_basis: "transaction_intent_amount"
               currency_mode: "inherit"
+              routing_completion_mode: "synchronous"
             - destination_role: "processor_services_product"
               outgoing_intent_id: "Transact-Purchase-Clearing-Processor"
               value_date_policy: "same_day"
               value_date_offset_days: 0
               amount_basis: "transaction_intent_amount"
               currency_mode: "inherit"
+              routing_completion_mode: "synchronous"
+        - intent_id: "Transact-Purchase-Refund-Clearing"
+          destinations:
+            - destination_role: "scheme_access_product"
+              outgoing_intent_id: "Transact-Purchase-Refund-Scheme"
+              value_date_policy: "same_day"
+              value_date_offset_days: 0
+              amount_basis: "transaction_intent_amount"
+              currency_mode: "inherit"
+              routing_completion_mode: "synchronous"
+            - destination_role: "processor_services_product"
+              outgoing_intent_id: "Transact-Purchase-Refund-Processor"
+              value_date_policy: "same_day"
+              value_date_offset_days: 0
+              amount_basis: "transaction_intent_amount"
+              currency_mode: "inherit"
+              routing_completion_mode: "synchronous"
       ledger_construction:
         - ledger_ref: "customer_funds"
           path_pattern: "[Funds][{product_role}][Customer]"
@@ -63,11 +92,55 @@ pipeline:
           destination_container_ref: "settlement_funds_container"
           amount_basis: "transaction_intent_amount"
           value_date_policy: "same_day"
-      fee_sequences: []
+      fee_sequences:
+        - sequence_id: "issuer_cardholder_fee_sequence"
+          fees:
+            # Spec 33 §Cardholder fee statement rule: 2% fee on purchase flow,
+            # emitted as non-payable (payable=false) netted advisement — no
+            # cardholder payment action is exposed.
+            - fee_id: "fee_issuer_cardholder_2pct"
+              trigger_ids: ["Transact-Purchase-Clearing"]
+              beneficiary_role: "self_agent"
+              beneficiary_product_role: "product_role"
+              payer_role: "cardholder_counterparty"
+              non_payable_statement: true
+              # Spec 40 §Lifecycle date semantics: explicit issue/due dates.
+              # Statement issues same day; due is same day (no payment needed).
+              invoice_issue_date_policy: "same_day"
+              invoice_issue_date_offset_days: 0
+              payment_due_date_policy: "same_day"
+              payment_due_date_offset_days: 0
+              settlement_value_date_policy: "same_day"
+              settlement_value_date_offset_days: 0
+              settlement_trigger_event: "invoice_transaction_event"
+              amount_percentage: 0.02
+      settlement_demand_sequences: []
+      settlement_payment_policies:
+        # Spec 40 §settlement_payment_policies: Alpha pays fee-category and
+        # settlement_demand-category obligations from settlement_funds_container.
+        - applies_to_category: "fee"
+          source_container_ref: "settlement_funds_container"
+          auto_pay_enabled: true
+          hold_default: false
+        - applies_to_category: "settlement_demand"
+          source_container_ref: "settlement_funds_container"
+          auto_pay_enabled: true
+          hold_default: false
       ledger_value_container_map:
         - ledger_ref: "settlement_funds"
           container_ref: "settlement_funds_container"
           mapping_mode: "aggregate"
+
+    # -----------------------------------------------------------------------
+    # Payment Scheme (sink). V4 additions:
+    #   - settlement_demand_sequences issuing demands in BOTH directions:
+    #       * purchase demand: creditor=scheme, debtor=Alpha
+    #       * refund demand  : creditor=Alpha,  debtor=scheme
+    #     On a tick with both purchase+refund flows, the signed aggregation
+    #     nets them into ONE demand-invoice per day per agent-pair.
+    #   - invoice_issue_date = next_working_day, payment_due_date = next_day+4
+    #     so the two dates differ.
+    # -----------------------------------------------------------------------
     - pipeline_profile_id: "scheme_access_pipeline"
       transaction_intents: []
       ledger_construction:
@@ -80,7 +153,9 @@ pipeline:
           amount_basis: "fee_amount"
           value_date_policy: "next_month_day_plus_x"
           value_date_offset_days: 5
-      value_container_construction: []
+      value_container_construction:
+        - container_ref: "scheme_settlement_container"
+          path_pattern: "[Container][{self_product}][Settlement]"
       asset_transfer_rules: []
       fee_sequences:
         - sequence_id: "scheme_fee_sequence"
@@ -89,6 +164,12 @@ pipeline:
               trigger_ids: ["Transact-Purchase-Clearing-Scheme"]
               beneficiary_role: "self_agent"
               beneficiary_product_role: "self_product"
+              payer_role: "payer_role"
+              # Scheme fee invoice: issued end of month day 1, payment due day 6.
+              invoice_issue_date_policy: "next_month_day_plus_x"
+              invoice_issue_date_offset_days: 0
+              payment_due_date_policy: "next_month_day_plus_x"
+              payment_due_date_offset_days: 5
               settlement_value_date_policy: "next_month_day_plus_x"
               settlement_value_date_offset_days: 5
               settlement_trigger_event: "invoice_transaction_event"
@@ -96,7 +177,43 @@ pipeline:
                 amount: 0.01
                 currency: "USD"
               amount_percentage: 0.0015
+      settlement_demand_sequences:
+        - sequence_id: "scheme_settlement_demand_sequence"
+          settlement_demands:
+            # Purchase direction: Alpha owes scheme the cleared purchase amount.
+            - settlement_demand_id: "sd_scheme_purchase_clearing"
+              trigger_ids: ["Transact-Purchase-Clearing-Scheme"]
+              creditor_role: "self_agent"
+              debtor_role: "payer_role"
+              invoice_category: "settlement_demand"
+              # Issue next working day (to exercise distinct issue vs due).
+              invoice_issue_date_policy: "next_working_day_plus_x"
+              invoice_issue_date_offset_days: 0
+              # Payable 2 working days later.
+              payment_due_date_policy: "next_working_day_plus_x"
+              payment_due_date_offset_days: 2
+              amount_percentage: 1.0
+            # Refund direction: scheme owes Alpha the refunded portion (~1% of
+            # the purchase volume — exercises pair-netting at demand aggregation).
+            - settlement_demand_id: "sd_scheme_refund_clearing"
+              trigger_ids: ["Transact-Purchase-Refund-Scheme"]
+              creditor_role: "payer_role"
+              debtor_role: "self_agent"
+              invoice_category: "settlement_demand"
+              invoice_issue_date_policy: "next_working_day_plus_x"
+              invoice_issue_date_offset_days: 0
+              payment_due_date_policy: "next_working_day_plus_x"
+              payment_due_date_offset_days: 2
+              amount_percentage: 0.01
+      # Scheme pays outbound settlement-demand obligations (e.g. refunds net-owed)
+      # from its own settlement container. Sink products allow negative balances.
+      settlement_payment_policies:
+        - applies_to_category: "settlement_demand"
+          source_container_ref: "scheme_settlement_container"
+          auto_pay_enabled: true
+          hold_default: false
       ledger_value_container_map: []
+
     - pipeline_profile_id: "processor_services_pipeline"
       transaction_intents: []
       ledger_construction:
@@ -109,7 +226,9 @@ pipeline:
           amount_basis: "fee_amount"
           value_date_policy: "next_month_day_plus_x"
           value_date_offset_days: 5
-      value_container_construction: []
+      value_container_construction:
+        - container_ref: "processor_settlement_container"
+          path_pattern: "[Container][{self_product}][Settlement]"
       asset_transfer_rules: []
       fee_sequences:
         - sequence_id: "processor_fee_sequence"
@@ -118,12 +237,19 @@ pipeline:
               trigger_ids: ["Transact-Purchase-Clearing-Processor"]
               beneficiary_role: "self_agent"
               beneficiary_product_role: "self_product"
+              payer_role: "payer_role"
+              invoice_issue_date_policy: "next_month_day_plus_x"
+              invoice_issue_date_offset_days: 0
+              payment_due_date_policy: "next_month_day_plus_x"
+              payment_due_date_offset_days: 5
               settlement_value_date_policy: "next_month_day_plus_x"
               settlement_value_date_offset_days: 5
               settlement_trigger_event: "invoice_transaction_event"
               count_cost:
                 amount: 0.03
                 currency: "USD"
+      settlement_demand_sequences: []
+      settlement_payment_policies: []
       ledger_value_container_map: []
 
 world:
@@ -145,9 +271,20 @@ world:
           pipeline_role_bindings:
             entity_roles:
               product_role: { product_id: "prod_prepaid_alpha" }
+              self_agent: { agent_id: "vendor_alpha" }
               scheme_access_product: { product_id: "prod_scheme_access" }
               processor_services_product: { product_id: "prod_processor_services" }
+              cardholder_counterparty: { agent_id: "vendor_alpha" }
             default_product_role: "product_role"
+            # Spec 40 §Container balance handling: Alpha opens its settlement
+            # container with enough cushion to service autopayments.
+            value_container_balances:
+              - container_ref: "settlement_funds_container"
+                opening_amount: 1000000.00
+                currency: "USD"
+              - container_ref: "customer_funds_container"
+                opening_amount: 0.00
+                currency: "USD"
     - vendor_id: "vendor_scheme"
       vendor_label: "Global Payment Scheme (Sink)"
       operational: true
@@ -160,7 +297,7 @@ world:
             entity_roles:
               self_agent: { agent_id: "vendor_scheme" }
               self_product: { product_id: "prod_scheme_access" }
-              payer_role: { agent_id: "vendor_alpha" }
+              payer_role: { agent_id: "vendor_alpha", product_id: "prod_prepaid_alpha" }
             default_product_role: "self_product"
     - vendor_id: "vendor_processor"
       vendor_label: "Payment Processor (Sink)"
@@ -174,7 +311,7 @@ world:
             entity_roles:
               self_agent: { agent_id: "vendor_processor" }
               self_product: { product_id: "prod_processor_services" }
-              payer_role: { agent_id: "vendor_alpha" }
+              payer_role: { agent_id: "vendor_alpha", product_id: "prod_prepaid_alpha" }
             default_product_role: "self_product"
   pops:
     - pop_id: "pop_main"

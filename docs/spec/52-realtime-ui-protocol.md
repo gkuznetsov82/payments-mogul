@@ -86,6 +86,10 @@ To support pipeline/ledger observability sections in **`60-screen-specs.md`**, s
   - if issuer is debtor, counterparty recipient view must represent receivable expectation while payment execution remains debtor-side.
 - `value_transfer_event`
   - source/destination container refs, amount, value date policy + resolved date, execution status.
+  - must include source/destination ownership context for correct Accounts attribution:
+    - `source_product_id`, optional `source_agent_id`,
+    - `destination_product_id`, optional `destination_agent_id`.
+  - when transfer fails (for example insufficient funds), event must indicate failed execution status and include failure reason.
 - `posting_entry_event`
   - source/destination ledger refs, debit/credit amount, posting date/status.
 - `invoice_transaction_event`
@@ -122,7 +126,13 @@ For async fan-out paths, `transaction_intent_event` resolution emissions should 
   - unsolicited advisement with no mapping.
 - Operator action acknowledgements (`operator_action_ack_event`) must reference underlying entity IDs and action type (`pay_now`, `hold`, `release_hold`).
 - Operator actions are not bound to `message_id`; they are bound to `invoice_id` / `settlement_demand_id`.
+- Action acknowledgement payload must indicate which entity key was used (`invoice_id` or `settlement_demand_id`) and whether target resolution succeeded.
 - Non-payable informational advisements (`payable=false`) must not expose payment actions in operator UIs.
+
+### Container balance visibility contract
+
+- `state_snapshot` should include container balances sufficient for Accounts/Obligations diagnostics.
+- Optional `container_balance_event` may be emitted on balance changes; if omitted, snapshot deltas must still provide full observability.
 
 ### Payload minimums for date/currency visibility
 

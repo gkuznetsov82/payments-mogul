@@ -75,7 +75,8 @@ Text-first presentation remains valid, but operator workflow must include focusa
 - Required interactions:
   - filter by product, counterparty role, fee id, date range,
   - phase-order sort (intent -> fee -> posting -> transfer),
-  - drill from one row into linked downstream records.
+  - drill from one row into linked downstream records,
+  - selectable log row with detail panel (full event payload) so row text stays compact.
 
 ### View C — Books (ledger hierarchy)
 
@@ -87,7 +88,8 @@ Text-first presentation remains valid, but operator workflow must include focusa
 - Required interactions:
   - compare-by-tick and compare-by-date modes,
   - expand/collapse by hierarchy level,
-  - jump from aggregate line to contributing posting rows.
+  - jump from aggregate line to contributing posting rows,
+  - selectable movement row with detail panel (full posting payload).
 
 ### View D — Accounts (value containers)
 
@@ -99,7 +101,8 @@ Text-first presentation remains valid, but operator workflow must include focusa
 - Required interactions:
   - compare-by-tick and compare-by-date modes,
   - highlight mismatches (`unmapped`, `unbalanced`),
-  - jump from account line to contributing transfer rows.
+  - jump from account line to contributing transfer rows,
+  - selectable movement row with detail panel (full transfer payload including source/destination owner context).
 
 ### View E — Obligations (invoices and settlement demands)
 
@@ -110,13 +113,34 @@ Text-first presentation remains valid, but operator workflow must include focusa
   - queue switch (`issued` | `received`) for selected role-side.
 - Required blocks:
   - invoice list (category-aware: `fee` vs `settlement_demand`) with lifecycle dates (`accrual_date`, `invoice_issue_date`, `payment_due_date`),
-  - settlement-demand list with same date semantics and status/residual fields,
-  - related message panel (informational only; actions are not performed on messages).
+  - settlement-demand list with same date semantics and status/residual fields.
 - Required actions (entity-bound):
   - `pay_now`, `hold`, `release_hold` on selected `invoice_id` / `settlement_demand_id`.
 - Required interaction behavior:
   - selecting an agent and switching creditor/debtor perspectives must re-scope both invoice and settlement-demand lists,
-  - `issued` and `received` lists must be available from both perspectives where data exists.
+  - `issued` and `received` lists must be available from both perspectives where data exists,
+  - list must be vertically scrollable with consistent styling semantics used in other movement/event views (status color tags, selected-row highlight),
+  - if no actionable entity is selected, obligation action controls must be visibly disabled.
+
+### View F — Messages
+
+- Purpose: operator attention queue for informational/warning/critical system messages.
+- Required blocks:
+  - message list with `message_id`, `severity`, `message_type`, `agent_id`, timestamp, and correlation fields (`invoice_id` / `settlement_demand_id` when present),
+  - message detail panel for selected item.
+- Required filters:
+  - severity,
+  - agent,
+  - unread/all.
+- Required interactions:
+  - mark message as read,
+  - drill-through from correlated message to Obligations view with referenced entity pre-selected.
+- Action boundary:
+  - payment/control actions must not execute from message rows,
+  - Messages view is informational/navigation-only; actions remain entity-bound in Obligations.
+- Control behavior:
+  - message controls are selection-scoped (operate only on selected `message_id`),
+  - controls requiring correlated entity must be disabled when selected message has no `invoice_id`/`settlement_demand_id`.
 
 ### Minimum navigation contract
 
@@ -128,6 +152,7 @@ Text-first presentation remains valid, but operator workflow must include focusa
   - `Books`
   - `Accounts`
   - `Obligations` (agent-scoped invoices and settlement demands; issued/received, creditor/debtor views)
+  - `Messages` (operator attention queue with correlation drill-through)
   - `Logs` (command/outcome/event stream; not required to be always visible).
 - If viewport is constrained, section switching may become paged, but all required sections remain reachable.
 
@@ -146,6 +171,9 @@ This prototype UI remains text-first and does not require graphical chart render
 - **Logs section sizing:**
   - minimum visible event list height: `12` rows,
   - must be vertically scrollable.
+- **Structured detail pane requirement:**
+  - Logs/Pipeline/Books/Accounts event lists must support selected-row detail rendering in a dedicated pane/region.
+  - Compact row text should prioritize scanability; full payload should be available only in the detail pane.
 
 ### Responsive behavior by viewport
 

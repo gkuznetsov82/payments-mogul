@@ -77,6 +77,8 @@ _To complete._ (e.g. MDR, interchange, acquirer, issuer, scheme, etc.)
 - **`71-implementation-roadmap.md`** — Phases and explicit “done” per phase.
 - **`72-adr/`** — Architecture Decision Records for costly-to-reverse choices only.
 - **`73-transaction-pipeline-handoff.md`** — RACI boundaries and prioritized implementation handoff backlog for transaction pipeline delivery.
+- **`74-world-builder-config-designer.md`** — Standalone World Builder (`v0_viewer`) product and contract spec for YAML validate/normalize/visualize/export flow.
+- **`75-world-builder-handoff.md`** — RACI boundaries and prioritized implementation handoff backlog for World Builder delivery.
 
 ### Ideation notes (non-authoritative)
 

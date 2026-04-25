@@ -199,6 +199,22 @@ These artifacts formalize the unstructured transaction-pipeline notes and are no
 - Settlement-demand issuer/obligor rule:
   - settlement demand is initiated by the issuing vendor/product, but creditor/debtor direction is determined by resolved roles.
   - when issuer is debtor (owes funds), recipient records receivable expectation and payment execution remains the issuer/debtor responsibility.
+- Container-balance execution rule:
+  - payment and transfer execution is balance-aware against payer-side source container balances.
+  - transfer application to balances occurs on resolved value date (not on accrual date).
+  - container balances are hard non-negative for non-sink agents; sink-agent negative balances remain scenario-governed.
+- Insufficient-funds rule:
+  - transfer execution is all-or-nothing in this phase (no partial transfer execution), including settlement-payment and pipeline asset-transfer paths,
+  - insufficient funds results in failed payment attempt and unchanged source/destination balances,
+  - residual remains full unsettled amount for the affected invoice/demand item.
+- Transfer observability rule:
+  - transfer events must expose both source and destination ownership context so Accounts view can attribute movements to actual owner products/agents.
+  - failed transfer attempts must emit explicit failed transfer event payloads with reason code.
+- Auto-pay deterministic ordering rule:
+  - when multiple payable items compete for the same source container on the same processing date, apply in deterministic order:
+    1. earliest `payment_due_date`,
+    2. earliest `invoice_issue_date`,
+    3. lexical entity ID (`invoice_id` / `settlement_demand_id`).
 - Operator action binding:
   - operator commands (`pay_now`, `hold`, `release_hold`) target underlying `invoice_id` or `settlement_demand_id`,
   - message records are informational and do not own action execution state.

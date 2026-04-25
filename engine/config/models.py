@@ -37,18 +37,37 @@ _ALLOWED_PRODUCT_CLASSES = ("GenericProduct", "RetailPayment-Card-Prepaid", "Sin
 
 
 class PipelineRoleSelector(BaseModel):
-    """Resolves a symbolic role to a concrete agent_id, product_id, or local sink."""
+    """Resolves a symbolic role to a concrete agent_id, product_id, or local sink.
+
+    Allowed combinations (spec 40 §pipeline_role_bindings):
+    - `{ agent_id: X }`          — role resolves to an agent.
+    - `{ product_id: Y }`        — role resolves to a product (agent derivable
+                                    via model lookup).
+    - `{ agent_id: X, product_id: Y }` — role resolves to a specific product
+                                    owned by a specific agent; enables
+                                    emission of both identities on directional
+                                    events like fee_accrual / settlement_demand.
+    - `{ local: true }`          — local sink; mutually exclusive with the others.
+    """
     agent_id: Optional[str] = None
     product_id: Optional[str] = None
     local: Optional[bool] = None
 
     @model_validator(mode="after")
-    def exactly_one_target(self) -> "PipelineRoleSelector":
-        present = sum(1 for v in (self.agent_id, self.product_id, self.local) if v)
-        if present != 1:
+    def must_have_one_target(self) -> "PipelineRoleSelector":
+        has_agent = bool(self.agent_id)
+        has_product = bool(self.product_id)
+        has_local = bool(self.local)
+        if not (has_agent or has_product or has_local):
             raise ValueError(
-                "E_PIPELINE_ROLE_SELECTOR_INVALID: selector must set exactly one of "
+                "E_PIPELINE_ROLE_SELECTOR_INVALID: selector must set at least one of "
                 "{agent_id, product_id, local}"
+            )
+        # `local` is mutually exclusive with agent_id / product_id.
+        if has_local and (has_agent or has_product):
+            raise ValueError(
+                "E_PIPELINE_ROLE_SELECTOR_INVALID: 'local: true' must not be combined "
+                "with agent_id or product_id"
             )
         return self
 
@@ -57,6 +76,11 @@ class PipelineRoleBindings(BaseModel):
     """Per-product-instance binding from symbolic role names to concrete refs."""
     entity_roles: dict[str, PipelineRoleSelector] = {}
     default_product_role: Optional[str] = None
+    # Spec 40 §Product-level role resolution (v4): opening balances for owned
+    # container refs. Non-sink products must have opening_amount >= 0 (enforced
+    # in the loader against product_class). Declared here because the bindings
+    # object is product-instance-scoped.
+    value_container_balances: list["ValueContainerOpeningBalanceConfig"] = []
 
 
 class ProductConfig(BaseModel):
@@ -677,14 +701,35 @@ class FeeConfig(BaseModel):
     fee_id: str
     trigger_ids: list[str] = []
     beneficiary_role: str
+    # Spec 40 §Intent of payer_role: optional for one-direction contracts;
+    # explicit for bilateral contracts where direction can flip.
+    payer_role: Optional[str] = None
     beneficiary_product_role: Optional[str] = None
+    # Legacy v3 settlement fields retained for back-compat. When the explicit
+    # v4 lifecycle-date fields below are omitted, loader derives
+    # invoice_issue_date_policy/offset and payment_due_date_policy/offset from
+    # these legacy fields (same policy/offset for both issue and due).
     settlement_value_date_policy: str
     settlement_value_date_offset_days: Optional[int] = None
+    # Spec 40 §Lifecycle date semantics (v4): explicit and separate issue/due
+    # policies. Aggregation keys use invoice_issue_date; overdue semantics use
+    # payment_due_date. Populated from settlement_value_date_* if omitted.
+    invoice_issue_date_policy: Optional[str] = None
+    invoice_issue_date_offset_days: Optional[int] = None
+    payment_due_date_policy: Optional[str] = None
+    payment_due_date_offset_days: Optional[int] = None
     settlement_trigger_event: Optional[str] = None
     allow_settlement_netting: Optional[bool] = None
+    # Spec 33 §Cardholder fee statement rule + spec 40 §settlement_payment_policies:
+    # when true, advisement is informational-only (payable=false, settlement status
+    # netted_internal) and must not enter payable queues or expose payment actions.
+    non_payable_statement: Optional[bool] = None
     filter: Optional[dict] = None
     count_cost: Optional[FeeAmountInput] = None
     amount_percentage: Optional[float] = None
+    # Spec 40 §Refund/purchase netting rule: formula_ref is accepted in schema
+    # for forward-compat but runtime execution stays on count_cost / amount_percentage
+    # in this iteration (expansion out of scope).
     formula_ref: Optional[str] = None
 
     @field_validator("settlement_value_date_policy")
@@ -696,11 +741,32 @@ class FeeConfig(BaseModel):
             )
         return v
 
+    @field_validator("invoice_issue_date_policy", "payment_due_date_policy")
+    @classmethod
+    def known_lifecycle_policy(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        if v not in _VALUE_DATE_POLICIES:
+            raise ValueError(
+                f"E_VALUE_DATE_POLICY_INVALID: must be one of {_VALUE_DATE_POLICIES}, got '{v}'"
+            )
+        return v
+
     @model_validator(mode="after")
     def settlement_offset_required(self) -> "FeeConfig":
         _check_offset_for_policy(self.settlement_value_date_policy,
                                   self.settlement_value_date_offset_days,
                                   "fees.settlement_value_date_offset_days")
+        # v4 lifecycle dates: if a policy is specified, its offset must follow
+        # the plus_x rule; if omitted, loader will backfill from legacy fields.
+        if self.invoice_issue_date_policy is not None:
+            _check_offset_for_policy(self.invoice_issue_date_policy,
+                                      self.invoice_issue_date_offset_days,
+                                      "fees.invoice_issue_date_offset_days")
+        if self.payment_due_date_policy is not None:
+            _check_offset_for_policy(self.payment_due_date_policy,
+                                      self.payment_due_date_offset_days,
+                                      "fees.payment_due_date_offset_days")
         # At least one amount driver required (spec 40: count_cost / amount_percentage / formula_ref)
         drivers = [self.count_cost is not None,
                    self.amount_percentage is not None,
@@ -712,10 +778,155 @@ class FeeConfig(BaseModel):
             )
         return self
 
+    # ------------------------------------------------------------------ helpers
+
+    def effective_invoice_issue_date_policy(self) -> str:
+        """Spec 40 §Lifecycle date semantics: when explicit policy omitted, fall
+        back to the legacy settlement_value_date_policy (preserves v3 behavior)."""
+        return self.invoice_issue_date_policy or self.settlement_value_date_policy
+
+    def effective_invoice_issue_date_offset_days(self) -> Optional[int]:
+        if self.invoice_issue_date_policy is not None:
+            return self.invoice_issue_date_offset_days
+        return self.settlement_value_date_offset_days
+
+    def effective_payment_due_date_policy(self) -> str:
+        return self.payment_due_date_policy or self.settlement_value_date_policy
+
+    def effective_payment_due_date_offset_days(self) -> Optional[int]:
+        if self.payment_due_date_policy is not None:
+            return self.payment_due_date_offset_days
+        return self.settlement_value_date_offset_days
+
 
 class FeeSequenceConfig(BaseModel):
     sequence_id: str
     fees: list[FeeConfig] = []
+
+
+# =============================================================================
+# Settlement-demand contracts (spec 33 §SettlementDemandResult, spec 40
+# §settlement_demand_sequences). Distinct from fees: directionality can flip
+# by net outcome and opposing-direction accruals net naturally by aggregation.
+# =============================================================================
+
+
+_INVOICE_CATEGORIES = ("fee", "settlement_demand")
+
+
+class SettlementDemandConfig(BaseModel):
+    settlement_demand_id: str
+    trigger_ids: list[str] = []
+    creditor_role: str
+    debtor_role: str
+    invoice_category: str = "settlement_demand"
+    invoice_issue_date_policy: str
+    invoice_issue_date_offset_days: Optional[int] = None
+    payment_due_date_policy: str
+    payment_due_date_offset_days: Optional[int] = None
+    # Amount drivers (spec 40): amount_percentage primary; formula_ref accepted
+    # in schema but not runtime-expanded in this iteration.
+    amount_percentage: Optional[float] = None
+    count_cost: Optional[FeeAmountInput] = None
+    formula_ref: Optional[str] = None
+
+    @field_validator("invoice_category")
+    @classmethod
+    def must_be_demand(cls, v: str) -> str:
+        if v != "settlement_demand":
+            raise ValueError(
+                f"E_INVOICE_CATEGORY_INVALID: settlement_demand rules must use "
+                f"invoice_category='settlement_demand', got '{v}'"
+            )
+        return v
+
+    @field_validator("invoice_issue_date_policy", "payment_due_date_policy")
+    @classmethod
+    def known_policy(cls, v: str) -> str:
+        if v not in _VALUE_DATE_POLICIES:
+            raise ValueError(
+                f"E_VALUE_DATE_POLICY_INVALID: must be one of {_VALUE_DATE_POLICIES}, got '{v}'"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def offsets_required(self) -> "SettlementDemandConfig":
+        _check_offset_for_policy(self.invoice_issue_date_policy,
+                                  self.invoice_issue_date_offset_days,
+                                  "settlement_demands.invoice_issue_date_offset_days")
+        _check_offset_for_policy(self.payment_due_date_policy,
+                                  self.payment_due_date_offset_days,
+                                  "settlement_demands.payment_due_date_offset_days")
+        # Amount driver required (same principle as FeeConfig).
+        drivers = [self.count_cost is not None,
+                   self.amount_percentage is not None,
+                   self.formula_ref is not None]
+        if not any(drivers):
+            raise ValueError(
+                "E_SETTLEMENT_DEMAND_DRIVER_MISSING: settlement demand must declare "
+                "at least one of count_cost / amount_percentage / formula_ref"
+            )
+        return self
+
+
+class SettlementDemandSequenceConfig(BaseModel):
+    sequence_id: str
+    settlement_demands: list[SettlementDemandConfig] = []
+
+
+# =============================================================================
+# Settlement payment policies (spec 40 §settlement_payment_policies) + opening
+# balances (spec 40 §Container balance handling).
+# =============================================================================
+
+
+class SettlementPaymentPolicyConfig(BaseModel):
+    applies_to_category: str        # "fee" | "settlement_demand"
+    source_container_ref: str
+    auto_pay_enabled: bool = True
+    hold_default: bool = False
+    grace_ticks: int = 0
+    non_payable_statement: bool = False
+
+    @field_validator("applies_to_category")
+    @classmethod
+    def known_category(cls, v: str) -> str:
+        if v not in _INVOICE_CATEGORIES:
+            raise ValueError(
+                f"E_INVOICE_CATEGORY_INVALID: applies_to_category must be one of "
+                f"{_INVOICE_CATEGORIES}, got '{v}'"
+            )
+        return v
+
+    @field_validator("grace_ticks")
+    @classmethod
+    def grace_non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(
+                f"E_GRACE_TICKS_INVALID: grace_ticks must be >= 0, got {v}"
+            )
+        return v
+
+
+class ValueContainerOpeningBalanceConfig(BaseModel):
+    """Spec 40 §Container balance handling (v4 semantics)."""
+    container_ref: str
+    opening_amount: float
+    currency: str
+
+    @field_validator("currency")
+    @classmethod
+    def iso_alpha3(cls, v: str) -> str:
+        if not _ISO_4217_ALPHA3.match(v):
+            raise ValueError(
+                f"E_OPENING_BALANCE_CURRENCY_INVALID: currency must be ISO 4217 alpha-3, got '{v}'"
+            )
+        return v
+
+
+# Resolve the forward reference in PipelineRoleBindings now that the referenced
+# class is defined.
+PipelineRoleBindings.model_rebuild()
 
 
 class LedgerValueContainerMapConfig(BaseModel):
@@ -741,6 +952,12 @@ class PipelineProfileConfig(BaseModel):
     value_container_construction: list[ValueContainerConstructionConfig] = []
     asset_transfer_rules: list[AssetTransferRuleConfig] = []
     fee_sequences: list[FeeSequenceConfig] = []
+    # Spec 40 §settlement_demand_sequences (v4): directional settlement claims
+    # distinct from fees; net by agent-pair + issue date + category.
+    settlement_demand_sequences: list[SettlementDemandSequenceConfig] = []
+    # Spec 40 §settlement_payment_policies (v4): payer-side payment execution
+    # controls per invoice category.
+    settlement_payment_policies: list[SettlementPaymentPolicyConfig] = []
     ledger_value_container_map: list[LedgerValueContainerMapConfig] = []
 
 

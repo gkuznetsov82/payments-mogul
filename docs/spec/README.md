@@ -10,7 +10,7 @@ Specs in this folder define *what* to build; implementation should match these d
 4. Config & fixtures: `40-` … `42-`
 5. API & validation: `50-` … `52-`
 6. UI: `12-ui-ux-spec.md`, `60-` … `62-`
-7. Delivery: `70-`, `71-`
+7. Delivery: `70-`, `71-`, `73-`, `74-`, `75-`
 
 ## Stack reference (vision)
 
@@ -55,3 +55,6 @@ Specs in this folder define *what* to build; implementation should match these d
 | `70-test-strategy.md` | Testing approach |
 | `71-implementation-roadmap.md` | Phases and done criteria |
 | `72-adr/README.md` | How to write ADRs |
+| `73-transaction-pipeline-handoff.md` | Pipeline delivery handoff contract |
+| `74-world-builder-config-designer.md` | World Builder product and API/UX contract |
+| `75-world-builder-handoff.md` | World Builder delivery handoff contract |

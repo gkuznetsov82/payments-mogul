@@ -101,6 +101,13 @@ class SpeedRequest(BaseModel):
     multiplier: float
 
 
+class OperatorActionRequest(BaseModel):
+    # Spec 33 §Operator action binding + spec 52 §Message and action ack:
+    # actions target entity IDs, never message IDs.
+    entity_type: str       # "invoice" | "settlement_demand"
+    entity_id: str
+
+
 # ------------------------------------------------------------------ control routes
 
 @app.get("/health")
@@ -138,6 +145,30 @@ async def next_day():
     engine = get_engine()
     result = await engine.next_day()
     return {"ok": result.get("accepted", True), "tick_id": engine.tick_id, **result}
+
+
+@app.post("/actions/pay_now")
+async def action_pay_now(req: OperatorActionRequest):
+    """Operator action: schedule immediate payment of a payable entity (spec 33)."""
+    engine = get_engine()
+    result = await engine.submit_operator_action("pay_now", req.entity_type, req.entity_id)
+    return {"ok": result.get("accepted", False), **result}
+
+
+@app.post("/actions/hold")
+async def action_hold(req: OperatorActionRequest):
+    """Operator action: place a hold on a payable entity so autopay skips it."""
+    engine = get_engine()
+    result = await engine.submit_operator_action("hold", req.entity_type, req.entity_id)
+    return {"ok": result.get("accepted", False), **result}
+
+
+@app.post("/actions/release_hold")
+async def action_release_hold(req: OperatorActionRequest):
+    """Operator action: release a prior hold so autopay can proceed."""
+    engine = get_engine()
+    result = await engine.submit_operator_action("release_hold", req.entity_type, req.entity_id)
+    return {"ok": result.get("accepted", False), **result}
 
 
 @app.post("/control/speed")

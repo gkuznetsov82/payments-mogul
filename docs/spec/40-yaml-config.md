@@ -439,6 +439,10 @@ Role resolution is owned by the product instance so the same pipeline profile ca
       - `{ product_id: "<id>" }`
       - `{ local: true }`
   - optional `default_product_role` (`string`) - role to use when a path pattern requires product role and no explicit override is provided
+  - optional `value_container_balances` (`array[object]`) - opening balances for owned container refs:
+    - `container_ref` (`string`) - must reference `value_container_construction[].container_ref` for the product profile
+    - `opening_amount` (`number`, `>= 0` for non-sink products)
+    - `currency` (`string`, ISO 4217 alpha-3)
 
 All role placeholders in pipeline path patterns and routing destinations must be resolvable from this mapping.
 
@@ -487,8 +491,27 @@ When a transaction intent routes from Product A to Product B:
 
 - Operator actions (`pay_now`, `hold`, `release_hold`) must target underlying `invoice_id` / `settlement_demand_id`.
 - Message records are informational and must not be treated as action targets.
+- Runtime must resolve both action target forms deterministically:
+  - `invoice_id` target resolves directly to payable/advisement entity record,
+  - `settlement_demand_id` target resolves via the currently open invoice/advisement mapped to that demand grouping.
 - Missing payer-side container mapping for payable invoice/demand must keep item in unpaid queue and emit operator-visible warning/critical message.
 - Non-payable statements (`non_payable_statement=true`) must not enter payable queues and must not expose payment actions.
+
+#### Container balance handling (required)
+
+- All transfer execution paths (pipeline asset transfers and settlement payment transfers) must read/write source and destination container balances.
+- Balance updates are applied on resolved value date, end of day balances are stored persistently
+- Non-sink products:
+  - source container balance must remain `>= 0`,
+  - insufficient funds causes transfer attempt failure (all-or-nothing, no partial debit/credit).
+- Sink products:
+  - negative balances are allowed by scenario rules.
+- Deterministic autopay ordering for shared source container contention:
+  1. earliest `payment_due_date`,
+  2. earliest `invoice_issue_date`,
+  3. lexical entity ID.
+- Config authoring note for prototype fixtures:
+  - if internal customer-funds containers are used as transfer sources, fixture must seed realistic opening balances or explicitly model external funding path; otherwise repeated debits should fail by insufficient-funds rule.
 
 #### Refund/purchase netting direction rule (required default)
 
