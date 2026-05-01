@@ -89,7 +89,7 @@ To support pipeline/ledger observability sections in **`60-screen-specs.md`**, s
   - must include source/destination ownership context for correct Accounts attribution:
     - `source_product_id`, optional `source_agent_id`,
     - `destination_product_id`, optional `destination_agent_id`.
-  - when transfer fails (for example insufficient funds), event must indicate failed execution status and include failure reason.
+  - when transfer fails (for example insufficient funds), event must indicate failed execution status and include failure reason (`reason_code` or equivalent explicit failure field).
 - `posting_entry_event`
   - source/destination ledger refs, debit/credit amount, posting date/status.
 - `invoice_transaction_event`
@@ -133,6 +133,13 @@ For async fan-out paths, `transaction_intent_event` resolution emissions should 
 
 - `state_snapshot` should include container balances sufficient for Accounts/Obligations diagnostics.
 - Optional `container_balance_event` may be emitted on balance changes; if omitted, snapshot deltas must still provide full observability.
+- Minimum container balance payload for Accounts diagnostics should include:
+  - owner identity (`agent_id` where applicable),
+  - `product_id`,
+  - `container_ref`,
+  - `current_balance`,
+  - optional `opening_balance`,
+  - optional `scheduled_total` / pending-delta summary.
 
 ### Payload minimums for date/currency visibility
 

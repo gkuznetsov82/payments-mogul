@@ -27,8 +27,8 @@ from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widgets import (
-    Button, DataTable, Footer, Header, Label, Log, RichLog, Select, Static,
-    TabbedContent, TabPane,
+    Button, DataTable, Footer, Header, Label, ListItem, ListView, Log, RichLog,
+    Select, Static, TabbedContent, TabPane,
 )
 
 from client.widgets import SelectableRichLog
@@ -187,6 +187,25 @@ class MogulApp(App):
         height: 1fr;
         border: solid $surface;
         padding: 0 1;
+        /* Spec 60 §View E + spec 73 §RR3: horizontal overflow keeps long
+           invoice / settlement_demand IDs reachable when row content exceeds
+           viewport width. ListView's scroll bars handle native scroll on
+           overflow. */
+        overflow-x: auto;
+        overflow-y: auto;
+    }
+    .obligations-list ListItem, #messages-list ListItem {
+        /* Allow rows to exceed viewport width; the parent's overflow-x:auto
+           presents a horizontal scrollbar so operators can pan to long ids. */
+        width: auto;
+        min-width: 100%;
+    }
+    .row-detail-pane {
+        height: auto;
+        min-height: 4;
+        padding: 0 1;
+        border: solid $accent;
+        margin: 0 0 1 0;
     }
     """
 
@@ -249,8 +268,21 @@ class MogulApp(App):
         self._selected_target_key: str = "__none__"
         # Books (ledger) + Accounts (value container) hierarchy state, populated
         # from posting_entry_event + value_transfer_event. Key: (product_id, path).
+        # Movement_net is diagnostic only — authoritative current_balance comes
+        # from `_container_balances` (spec 60 §View D: "must show authoritative
+        # container current_balance ... separately from movement-derived net").
         self._books_by_path: dict[str, dict] = {}
         self._accounts_by_path: dict[str, dict] = {}
+        # Spec 52 §Container balance visibility contract: keyed by
+        # (product_id, container_ref) -> snapshot row dict.
+        self._container_balances: dict[tuple[str, str], dict] = {}
+        # Track world identity so we can detect a server restart (same process
+        # reload OR new process via dev.py wrapper) and wipe stale state.
+        # `world_generation` increments on in-process reloads; on a process
+        # restart the new server starts at generation 0 with tick_id 0 so we
+        # also fall back to "tick_id moved backwards" as a restart signal.
+        self._last_world_generation: Optional[int] = None
+        self._last_tick_id: Optional[int] = None
         # Speed pacing (spec 51 §Speed / 52 §Set speed). Cycle button steps
         # through 1× → 2× → 3× → 1×; label reflects the server's authoritative
         # value (updated via speed_changed event + state_snapshot).
@@ -268,6 +300,15 @@ class MogulApp(App):
         self._messages_selected_id: Optional[str] = None
         # Known agent ids for obligation/message selectors.
         self._known_agent_ids: list[str] = []
+        # Spec 60 §View B/C/D: detail-pane row selection. We mirror each log
+        # widget's lines with the structured payload so cursor selection can
+        # render the full event in a side panel.
+        self._log_payloads: dict[str, list[dict]] = {
+            "pipeline-log": [],
+            "books-log": [],
+            "accounts-log": [],
+            "event-log": [],
+        }
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -320,6 +361,9 @@ class MogulApp(App):
                         classes="log-hint",
                     )
                     yield SelectableRichLog(id="pipeline-log", highlight=True, markup=True, auto_scroll=True)
+                    yield Label("── Detail (selected row) ──")
+                    yield Static("(no row selected)", id="pipeline-detail",
+                                 classes="row-detail-pane")
             with TabPane("Books [F3]", id="tab-books"):
                 with Vertical(classes="tab-pane-content"):
                     yield Label("[bold]Ledger hierarchy[/] — balances and paths per product")
@@ -331,6 +375,9 @@ class MogulApp(App):
                         classes="log-hint",
                     )
                     yield SelectableRichLog(id="books-log", highlight=True, markup=True, auto_scroll=True)
+                    yield Label("── Detail (selected row) ──")
+                    yield Static("(no row selected)", id="books-detail",
+                                 classes="row-detail-pane")
             with TabPane("Accounts [F4]", id="tab-accounts"):
                 with Vertical(classes="tab-pane-content"):
                     yield Label("[bold]Value-container hierarchy[/] — funds by owner/product")
@@ -342,6 +389,9 @@ class MogulApp(App):
                         classes="log-hint",
                     )
                     yield SelectableRichLog(id="accounts-log", highlight=True, markup=True, auto_scroll=True)
+                    yield Label("── Detail (selected row) ──")
+                    yield Static("(no row selected)", id="accounts-detail",
+                                 classes="row-detail-pane")
             # Spec 60 §View E — Obligations (agent-scoped invoices + demands).
             with TabPane("Obligations [F5]", id="tab-obligations"):
                 with Vertical(classes="tab-pane-content"):
@@ -368,17 +418,23 @@ class MogulApp(App):
                             allow_blank=False,
                         )
                     yield Label("── Invoices (fee + settlement_demand) ──")
-                    yield Static("(no invoices yet)", id="obligations-invoices", classes="obligations-list")
+                    # Spec 60 §View E + spec 73 §R6: scrollable list of
+                    # rows with selected-row highlight; status color tags.
+                    # Buttons stay disabled until a payable entity is selected.
+                    yield ListView(id="obligations-list", classes="obligations-list")
                     yield Label("── Selected entity actions ──")
                     yield Static(
-                        "[dim]Click a row's entity id above to select; "
-                        "non-payable entities do not expose payment actions.[/]",
+                        "[dim]Use ↑/↓ in the list to select; non-payable "
+                        "entities keep payment actions disabled.[/]",
                         id="obligations-selection-hint",
                     )
                     with Horizontal(classes="obligations-actions-row"):
-                        yield Button("Pay Now", id="btn-pay-now", variant="success")
-                        yield Button("Hold", id="btn-hold", variant="warning")
-                        yield Button("Release Hold", id="btn-release-hold", variant="primary")
+                        yield Button("Pay Now", id="btn-pay-now",
+                                     variant="success", disabled=True)
+                        yield Button("Hold", id="btn-hold",
+                                     variant="warning", disabled=True)
+                        yield Button("Release Hold", id="btn-release-hold",
+                                     variant="primary", disabled=True)
                     yield Label("Selected entity:")
                     yield Static("(none)", id="obligations-selected-entity")
             # Spec 60 §View F — Messages (operator attention queue).
@@ -410,10 +466,15 @@ class MogulApp(App):
                             value="all",
                             allow_blank=False,
                         )
-                    yield Static("(no messages yet)", id="messages-list")
+                    yield ListView(id="messages-list")
                     with Horizontal(classes="messages-actions-row"):
-                        yield Button("Mark read", id="btn-messages-mark-read", variant="primary")
-                        yield Button("Open in Obligations", id="btn-messages-drill", variant="success")
+                        # Spec 73 §R7: controls are selection-scoped + disabled
+                        # when no message is selected. Drill-through additionally
+                        # disabled when selected message lacks correlation.
+                        yield Button("Mark read", id="btn-messages-mark-read",
+                                     variant="primary", disabled=True)
+                        yield Button("Open in Obligations", id="btn-messages-drill",
+                                     variant="success", disabled=True)
             with TabPane("Logs [F7]", id="tab-logs"):
                 with Vertical(classes="tab-pane-content"):
                     yield Label("── Recent Events ──")
@@ -747,6 +808,7 @@ class MogulApp(App):
                 self._log_line(f"[magenta]inputs_processed[/] T{data.get('tick_id')} commands={n}")
         # ---- Pipeline tab events (spec 52 §Pipeline observability) ----
         elif event_type == "transaction_intent_event":
+            self._log_payloads["pipeline-log"].append({"event": event_type, "data": data})
             stage = data.get("intent_stage", "routed_outgoing")
             root = data.get("root_intent_id", data.get("intent_id"))
             # Spec 33 §Transaction-intent log visibility: show original_incoming
@@ -774,6 +836,7 @@ class MogulApp(App):
                     f"reason={reason}"
                 )
         elif event_type == "fee_accrual_event":
+            self._log_payloads["pipeline-log"].append({"event": event_type, "data": data})
             self._log_pipeline(
                 f"[yellow]fee[/] T{data.get('tick_id')} prof={data.get('pipeline_profile_id')} "
                 f"id={data.get('fee_id')} trig={data.get('trigger_id')} "
@@ -785,6 +848,7 @@ class MogulApp(App):
                 f"due={data.get('settlement_due_date')} status={data.get('status')}"
             )
         elif event_type == "value_transfer_event":
+            self._log_payloads["accounts-log"].append({"event": event_type, "data": data})
             # Spec 60 §View D — Accounts: value-container movements.
             self._log_accounts(
                 f"[green]xfer[/] T{data.get('tick_id')} prof={data.get('pipeline_profile_id')} "
@@ -795,6 +859,7 @@ class MogulApp(App):
             self._record_account_movement(data)
         elif event_type == "invoice_transaction_event":
             # v4: route to obligations state, pipeline log, and books log.
+            self._log_payloads["pipeline-log"].append({"event": event_type, "data": data})
             self._invoices[data["invoice_id"]] = data
             self._log_pipeline(
                 f"[bold yellow]invoice[/] T{data.get('tick_id')} "
@@ -806,6 +871,7 @@ class MogulApp(App):
             self._refresh_obligations()
         # ---- Books tab events (spec 60 §View C — ledger hierarchy) ----
         elif event_type == "posting_entry_event":
+            self._log_payloads["books-log"].append({"event": event_type, "data": data})
             self._log_books(
                 f"[cyan]post[/] T{data.get('tick_id')} prof={data.get('pipeline_profile_id')} "
                 f"id={data.get('posting_id')} trig={data.get('trigger_id')} "
@@ -816,6 +882,7 @@ class MogulApp(App):
             self._record_book_movement(data)
         elif event_type == "settlement_resolution_event":
             # v4: route to obligations state + books log.
+            self._log_payloads["books-log"].append({"event": event_type, "data": data})
             self._resolutions[data["invoice_id"]] = data
             self._log_books(
                 f"[bold green]settle[/] T{data.get('tick_id')} inv={data.get('invoice_id')} "
@@ -827,6 +894,12 @@ class MogulApp(App):
             )
             self._refresh_obligations()
         elif event_type == "settlement_demand_event":
+            # Keep `_log_payloads["pipeline-log"]` in lock-step with the rendered
+            # log lines so detail-pane selection stays aligned: every line we
+            # write here MUST have a matching payload entry, otherwise cursor
+            # rows past this point fall off the end of the payload list and
+            # the detail pane silently renders "(no row selected)".
+            self._log_payloads["pipeline-log"].append({"event": event_type, "data": data})
             self._log_pipeline(
                 f"[magenta]demand[/] {data.get('settlement_demand_id')} "
                 f"{data.get('creditor_agent_id')} <- {data.get('debtor_agent_id')} "
@@ -860,12 +933,9 @@ class MogulApp(App):
             gen = data.get("world_generation")
             self._set_banner("")
             self._log_line(f"[green]world_restarted[/] gen={gen} tick={data.get('tick_id')}")
-            # Fresh world → drop accumulated hierarchy state so the Books/Accounts
-            # views don't carry over balances from the previous world generation.
-            self._books_by_path.clear()
-            self._accounts_by_path.clear()
-            self._render_books_tree()
-            self._render_accounts_tree()
+            # Full reset — drop ALL accumulated state (counters, logs, queues,
+            # detail panes) so the new world doesn't carry stale data forward.
+            self._reset_world_state(reason=f"world_restarted gen={gen}")
             snap = data.get("snapshot")
             if snap:
                 self._apply_snapshot(snap)
@@ -914,12 +984,37 @@ class MogulApp(App):
             )
 
     def _apply_snapshot(self, snap: dict) -> None:
+        # Detect server / world restart by comparing snapshot identity to the
+        # last one we observed. Two distinct restart paths land here:
+        #   1. In-process reload: world_generation increments while tick_id
+        #      drops back to 0.
+        #   2. Process restart (e.g., dev.py wrapper): the new server starts
+        #      at world_generation=0 / tick_id=0 — so generation may match
+        #      our last value but tick_id moved backwards.
+        # Either signal triggers a full client-side reset BEFORE we ingest
+        # the new snapshot, otherwise the rebuilt views would carry stale
+        # invoices / messages / movement nets / log lines.
+        new_gen = snap.get("world_generation", 0)
+        new_tick = snap.get("tick_id", 0)
+        gen_changed = (self._last_world_generation is not None
+                        and new_gen != self._last_world_generation)
+        tick_regressed = (self._last_tick_id is not None
+                           and new_tick < self._last_tick_id)
+        if gen_changed or tick_regressed:
+            self._reset_world_state(
+                reason=(f"snapshot mismatch: gen "
+                        f"{self._last_world_generation}->{new_gen}, "
+                        f"tick {self._last_tick_id}->{new_tick}")
+            )
+        self._last_world_generation = new_gen
+        self._last_tick_id = new_tick
+
         status = self.query_one("#status", StatusBar)
-        status.tick_id = snap.get("tick_id", 0)
+        status.tick_id = new_tick
         status.run_mode = snap.get("run_mode", snap.get("engine_state", "idle"))
         status.intake_open = snap.get("intake_open", False)
         status.intake_frozen = snap.get("intake_frozen", False)
-        status.world_generation = snap.get("world_generation", 0)
+        status.world_generation = new_gen
         # v2 foundations (spec 40): scenario time + currency context.
         status.simulation_date = snap.get("simulation_date") or ""
         status.default_currency = snap.get("default_currency") or ""
@@ -943,6 +1038,18 @@ class MogulApp(App):
         if "speed_multiplier" in snap:
             self._speed_multiplier = float(snap["speed_multiplier"])
             self._refresh_speed_button()
+
+        # Spec 52 §Container balance visibility contract + spec 60 §View D:
+        # ingest authoritative container balances and re-render Accounts so
+        # `current_balance` is presented separately from movement-derived net.
+        containers = snap.get("containers", [])
+        if containers:
+            new_balances: dict[tuple[str, str], dict] = {}
+            for c in containers:
+                key = (c.get("product_id", ""), c.get("container_ref", ""))
+                new_balances[key] = c
+            self._container_balances = new_balances
+            self._render_accounts_tree()
 
         # Vendor / product info (spec 60 §Numeric presentation: counts as
         # integers, amounts at configured scale).
@@ -1024,7 +1131,18 @@ class MogulApp(App):
         self._render_books_tree()
 
     def _record_account_movement(self, d: dict) -> None:
-        """Update account hierarchy from a value_transfer_event."""
+        """Update movement-derived diagnostic net from a value_transfer_event.
+
+        Spec 60 §View D: this is `movement_net` only (diagnostic). Authoritative
+        balance comes from snapshot `containers[].current_balance` (spec 52
+        §Container balance visibility contract). Source/destination sides
+        attribute to their OWN owners (spec 73 §R3) — not the owning product
+        of the rule.
+        """
+        # Failed transfers must NOT contribute to movement_net (no balance
+        # mutation occurred per spec 73 §R2).
+        if d.get("status") == "failed":
+            return
         amount = d.get("amount") or {}
         amt_val = 0.0
         if isinstance(amount, dict):
@@ -1033,10 +1151,16 @@ class MogulApp(App):
             except (TypeError, ValueError):
                 amt_val = 0.0
         currency = amount.get("currency") if isinstance(amount, dict) else None
-        product = d.get("product_id") or "(unknown)"
-        for path, ref, sign in (
-            (d.get("source_container_path"), d.get("source_container_ref"), -1.0),
-            (d.get("destination_container_path"), d.get("destination_container_ref"), +1.0),
+        # Spec 73 §R3 + spec 52 §value_transfer_event: attribute each side to
+        # its own owner. Falls back to legacy `product_id` for forward compat.
+        legacy_product = d.get("product_id") or "(unknown)"
+        source_product = d.get("source_product_id") or legacy_product
+        destination_product = d.get("destination_product_id") or legacy_product
+        for path, ref, product, sign in (
+            (d.get("source_container_path"), d.get("source_container_ref"),
+             source_product, -1.0),
+            (d.get("destination_container_path"), d.get("destination_container_ref"),
+             destination_product, +1.0),
         ):
             if not path:
                 continue
@@ -1078,26 +1202,81 @@ class MogulApp(App):
         widget.update("\n".join(lines))
 
     def _render_accounts_tree(self) -> None:
-        """Render a product-grouped hierarchy of container paths + net balances."""
+        """Render Accounts hierarchy with authoritative current_balance + diagnostic
+        movement_net (spec 60 §View D).
+
+        Authoritative `current_balance` comes from snapshot container payload
+        (spec 52 §Container balance visibility contract); `movement_net` is
+        an event-stream rollup and is presented separately as a diagnostic.
+        """
         try:
             widget = self.query_one("#accounts-tree", Static)
         except Exception:
             return
-        if not self._accounts_by_path:
+        if not self._accounts_by_path and not self._container_balances:
             widget.update("(no transfers yet)")
             return
-        by_product: dict[str, list[dict]] = {}
+        # Index movement-derived nets by (product_id, container_ref) so we can
+        # join authoritative balance + movement on the same line.
+        by_pc: dict[tuple[str, str], dict] = {}
         for entry in self._accounts_by_path.values():
-            by_product.setdefault(entry["product_id"], []).append(entry)
+            by_pc[(entry["product_id"], entry.get("container_ref") or "")] = entry
+        # Union of products: those with movement OR those with a known balance.
+        product_ids: set[str] = set()
+        for entry in self._accounts_by_path.values():
+            product_ids.add(entry["product_id"])
+        for (pid, _cref) in self._container_balances.keys():
+            product_ids.add(pid)
+        if not product_ids:
+            widget.update("(no transfers yet)")
+            return
+        # Group containers per product for the tree.
+        per_product: dict[str, list[dict]] = {}
+        for (pid, cref), bal in self._container_balances.items():
+            per_product.setdefault(pid, []).append({
+                "product_id": pid,
+                "container_ref": cref,
+                "path": bal.get("path"),
+                "currency": bal.get("currency"),
+                "current_balance": bal.get("current_balance"),
+                "opening_balance": bal.get("opening_balance"),
+                "scheduled_total": bal.get("scheduled_total"),
+                "is_sink": bal.get("is_sink"),
+                "movement": by_pc.get((pid, cref)),
+            })
+        # Also surface movement-only entries (no authoritative balance row yet).
+        for (pid, cref), entry in by_pc.items():
+            if not any(c["container_ref"] == cref for c in per_product.get(pid, [])):
+                per_product.setdefault(pid, []).append({
+                    "product_id": pid,
+                    "container_ref": cref,
+                    "path": entry.get("path"),
+                    "currency": entry.get("currency"),
+                    "current_balance": None,
+                    "opening_balance": None,
+                    "scheduled_total": None,
+                    "is_sink": None,
+                    "movement": entry,
+                })
         lines: list[str] = []
-        for pid in sorted(by_product):
+        for pid in sorted(per_product):
             lines.append(f"[bold]{pid}[/]")
-            for entry in sorted(by_product[pid], key=lambda e: e["path"]):
-                ccy = entry["currency"] or ""
+            for c in sorted(per_product[pid], key=lambda e: (e.get("path") or "")):
+                ccy = c["currency"] or ""
+                bal = c["current_balance"]
+                bal_str = (f"current={bal:,.{self._amount_scale_dp}f} {ccy}".rstrip()
+                            if bal is not None else "current=[dim]?[/]")
+                movement = c.get("movement")
+                if movement is not None:
+                    mn = movement["net"]
+                    move_str = (f"[dim]movement_net={mn:,.{self._amount_scale_dp}f} "
+                                 f"n={movement['n']}[/]")
+                else:
+                    move_str = "[dim]movement_net=0 n=0[/]"
                 lines.append(
-                    f"  {entry['path']}  "
-                    f"[dim]ref={entry['container_ref']} n={entry['n']}[/]  "
-                    f"net={entry['net']:,.{self._amount_scale_dp}f} {ccy}".rstrip()
+                    f"  {c.get('path') or c['container_ref']}  "
+                    f"[dim]ref={c['container_ref']}[/]  "
+                    f"[bold]{bal_str}[/]  {move_str}".rstrip()
                 )
         widget.update("\n".join(lines))
 
@@ -1147,6 +1326,48 @@ class MogulApp(App):
         except ValueError:
             return None, None
 
+    def on_selectable_rich_log_line_selected(
+        self, event: SelectableRichLog.LineSelected) -> None:
+        """Spec 60 §View B/C/D: render the selected row's full payload in
+        the matching detail pane."""
+        log_id = event.log_id
+        if log_id not in ("pipeline-log", "books-log", "accounts-log"):
+            return
+        detail_id = {
+            "pipeline-log": "pipeline-detail",
+            "books-log": "books-detail",
+            "accounts-log": "accounts-detail",
+        }[log_id]
+        try:
+            detail = self.query_one(f"#{detail_id}", Static)
+        except Exception:
+            return
+        line_idx = event.line_index
+        payloads = self._log_payloads.get(log_id, [])
+        if line_idx is None:
+            detail.update("(no row selected)")
+            return
+        if not (0 <= line_idx < len(payloads)):
+            # Defensive: this means an event wrote a row to the log without
+            # adding a matching payload entry (or vice versa). Surface the
+            # drift loudly instead of silently falling back to "(no row
+            # selected)" — which previously masked the bug where
+            # settlement_demand_event lines were missing from the payload list.
+            detail.update(
+                f"[red](row index {line_idx} out of range; payload list has "
+                f"{len(payloads)} entries — internal drift, please report)[/]"
+            )
+            return
+        payload = payloads[line_idx]
+        # Compact, deterministic key=value pairs so the detail pane is scannable.
+        ev = payload.get("event", "")
+        data = payload.get("data", {})
+        lines = [f"[bold]{ev}[/]"]
+        for k in sorted(data.keys()):
+            v = data[k]
+            lines.append(f"  {k}: {v}")
+        detail.update("\n".join(lines))
+
     def on_select_changed(self, event: Select.Changed) -> None:
         sid = event.select.id
         if sid == "agent-target-select":
@@ -1159,6 +1380,41 @@ class MogulApp(App):
                       "messages-agent-select",
                       "messages-read-select"):
             self._refresh_messages()
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        """Spec 60 §View E/F: clicking a row in Obligations / Messages selects
+        that entity. Selection-scoped action buttons recompute disabled state.
+
+        Local selection ALWAYS keys by `invoice_id` so the actionability
+        lookup against `self._invoices` (which is keyed by invoice_id) works
+        for both fee and settlement_demand category invoices. The engine API
+        still supports demand-id targeting; the TUI uses invoice-id internally
+        to keep local widget state coherent (regression: previously a demand
+        row selected by `settlement_demand_id` could never become actionable
+        because `self._invoices.get(<demand_id>)` returns None).
+        """
+        lv_id = event.list_view.id
+        idx = event.list_view.index
+        if idx is None:
+            return
+        if lv_id == "obligations-list":
+            matching = self._filtered_obligation_invoices()
+            if 0 <= idx < len(matching):
+                inv = matching[idx]
+                # entity_type reflects category for ack semantics; entity_id is
+                # always the invoice_id for local-lookup correctness.
+                entity_type = ("settlement_demand"
+                               if inv["invoice_category"] == "settlement_demand"
+                               else "invoice")
+                entity_id = inv["invoice_id"]
+                self._obligations_selected_entity = (entity_type, entity_id)
+                self._refresh_selection_display()
+                self._update_obligations_action_buttons()
+        elif lv_id == "messages-list":
+            filtered = self._filtered_messages()
+            if 0 <= idx < len(filtered):
+                self._messages_selected_id = filtered[idx].get("message_id")
+                self._update_messages_action_buttons()
 
     def _refresh_selection_display(self) -> None:
         try:
@@ -1175,11 +1431,70 @@ class MogulApp(App):
             f"{entity_type}: {entity_id}" + (" [dim](non-payable)[/]" if not payable else "")
         )
 
+    def _reset_world_state(self, reason: str) -> None:
+        """Wipe all accumulating client-side state when a fresh world is detected.
+
+        Triggers (any of):
+        - `world_restarted` SSE event arrives with a new world_generation.
+        - A state_snapshot arrives with a world_generation different from the
+          one we last observed (e.g., reload bumped it).
+        - A state_snapshot arrives with tick_id < last_tick_id (e.g., server
+          restarted as a new process via dev.py wrapper — generation goes 0
+          and tick goes 0 even though the TUI saw N>0 previously).
+
+        Spec 60 §Text lifecycle banner: world_restarting/world_restarted are
+        expected lifecycle transitions, not errors — the banner already
+        reflects them. This helper additionally guarantees the displayed
+        counters/logs/queues do NOT carry stale data forward.
+        """
+        # Movement / hierarchy / payload mirrors.
+        self._books_by_path.clear()
+        self._accounts_by_path.clear()
+        self._container_balances.clear()
+        for log_id in self._log_payloads:
+            self._log_payloads[log_id].clear()
+        # Obligations + messages.
+        self._invoices.clear()
+        self._resolutions.clear()
+        self._messages.clear()
+        self._obligations_selected_entity = None
+        self._messages_selected_id = None
+        # Detail panes + tree summaries.
+        for static_id in ("books-tree", "accounts-tree", "vendor-info", "pop-info"):
+            try:
+                self.query_one(f"#{static_id}", Static).update("(reset on world restart)")
+            except Exception:
+                pass
+        for detail_id in ("pipeline-detail", "books-detail", "accounts-detail"):
+            try:
+                self.query_one(f"#{detail_id}", Static).update("(no row selected)")
+            except Exception:
+                pass
+        # Clear all RichLog widgets so old lines don't carry over.
+        for log_id in ("event-log", "pipeline-log", "books-log", "accounts-log"):
+            try:
+                self.query_one(f"#{log_id}", RichLog).clear()
+            except Exception:
+                pass
+        # Refresh visible obligations + messages views.
+        self._refresh_obligations()
+        self._refresh_messages()
+        self._render_books_tree()
+        self._render_accounts_tree()
+        self._log_line(f"[magenta]world_state_reset[/] reason={reason}")
+
     def select_obligation_entity(self, entity_type: str, entity_id: str) -> None:
-        """Programmatic selection helper (exposed for tests + drill-through)."""
+        """Programmatic selection helper (exposed for tests + drill-through).
+
+        `entity_id` MUST be an invoice_id (the TUI's internal lookup key)
+        regardless of category — see `on_list_view_selected` for the
+        rationale. Callers that have a settlement_demand_id should resolve
+        it to the matching invoice via `_invoices` before calling here.
+        """
         self._obligations_selected_entity = (entity_type, entity_id)
         self._refresh_selection_display()
         self._refresh_obligations()
+        self._update_obligations_action_buttons()
 
     def select_message(self, message_id: str) -> None:
         """Programmatic selection helper (exposed for tests + drill-through)."""
@@ -1188,31 +1503,16 @@ class MogulApp(App):
 
     # ------------------------------------------------------------------ obligations / messages (spec 60 §Views E/F)
 
-    def _refresh_obligations(self) -> None:
-        """Render the currently-filtered obligations list based on the agent
-        selector + creditor/debtor + issued/received filters.
-
-        Filtering rules (spec 60 §View E):
-        - Agent selector scopes to a single agent.
-        - role_side = creditor | debtor.
-        - queue = issued | received (for the selected agent perspective).
-          Issued: agent is on the matching side (e.g. creditor-issued means
-          invoices where agent is creditor AND agent is the invoice's issuing
-          perspective). For our single-product issuer model we treat "issued"
-          as invoices where the selected role_side matches the agent and the
-          payer is a DIFFERENT agent; "received" is the flip.
-        """
+    def _filtered_obligation_invoices(self) -> list[dict]:
         try:
-            widget = self.query_one("#obligations-invoices", Static)
             agent_sel = self.query_one("#obligations-agent-select", Select)
             role_sel = self.query_one("#obligations-role-select", Select)
             queue_sel = self.query_one("#obligations-queue-select", Select)
         except Exception:
-            return
+            return []
         agent_id = agent_sel.value
         role_side = role_sel.value or "creditor"
         queue = queue_sel.value or "issued"
-
         matching: list[dict] = []
         for inv in sorted(self._invoices.values(),
                           key=lambda d: (d.get("invoice_issue_date", ""),
@@ -1223,64 +1523,105 @@ class MogulApp(App):
             debtor = inv.get("debtor_agent_id")
             if role_side == "creditor":
                 if queue == "issued":
-                    # Agent is the creditor.
                     if creditor != agent_id:
                         continue
                 else:
-                    # "received" from creditor perspective — when this
-                    # agent is receiving a statement as a creditor from
-                    # another creditor doesn't really happen; we show nothing.
                     if creditor != agent_id or debtor == agent_id:
                         continue
             else:  # debtor
                 if queue == "issued":
-                    # Demand issued by agent as debtor (rare; sinks issuing
-                    # credits to others). Usually empty.
                     if debtor != agent_id or creditor == agent_id:
                         continue
                 else:
-                    # Received as debtor = invoices where agent owes.
                     if debtor != agent_id:
                         continue
             matching.append(inv)
+        return matching
 
-        if not matching:
-            widget.update("(no obligations matching current filters)")
-            return
-        lines: list[str] = []
-        for inv in matching:
-            resolution = self._resolutions.get(inv["invoice_id"])
-            if resolution:
-                status = resolution.get("final_status", "?")
-            else:
-                status = inv.get("settlement_status", "pending")
-            payable_mark = " [dim](non-payable)[/]" if not inv.get("payable", True) else ""
-            selected_mark = ""
-            if self._obligations_selected_entity == (
-                "invoice", inv["invoice_id"]):
-                selected_mark = " [reverse]◀ SELECTED[/]"
-            lines.append(
-                f"{inv['invoice_id']} · {inv['invoice_category']} · "
-                f"{self._fmt_amount(inv.get('amount'))} · "
-                f"issue={inv.get('invoice_issue_date')} "
-                f"due={inv.get('payment_due_date')} "
-                f"status=[{status}]{payable_mark}{selected_mark}"
-            )
-        widget.update("\n".join(lines))
+    def _format_obligation_row(self, inv: dict) -> str:
+        """Build the Rich-markup row for an obligation. Status color tag and
+        non-payable marker are part of the row text per spec 73 §R6. Exposed
+        for tests + diagnostics so the markup contract is independently verifiable."""
+        resolution = self._resolutions.get(inv["invoice_id"])
+        status = (resolution.get("final_status", "?") if resolution
+                  else inv.get("settlement_status", "pending"))
+        color = {
+            "paid": "green",
+            "failed": "red",
+            "pending": "yellow",
+            "netted_internal": "dim",
+        }.get(status, "white")
+        payable_mark = " [dim](non-payable)[/]" if not inv.get("payable", True) else ""
+        return (
+            f"[{color}]●[/] {inv['invoice_id']} · {inv['invoice_category']} · "
+            f"{self._fmt_amount(inv.get('amount'))} · "
+            f"issue={inv.get('invoice_issue_date')} "
+            f"due={inv.get('payment_due_date')} "
+            f"[{color}]{status}[/]{payable_mark}"
+        )
 
-    def _refresh_messages(self) -> None:
+    def _refresh_obligations(self) -> None:
+        """Spec 60 §View E + spec 73 §R6: populate scrollable ListView with
+        status-coloured rows and selected-row highlight via ListItem ids."""
         try:
-            widget = self.query_one("#messages-list", Static)
+            lv = self.query_one("#obligations-list", ListView)
+        except Exception:
+            return
+        matching = self._filtered_obligation_invoices()
+        # Rebuild list. Persist selection if still present.
+        sel_invoice_id = None
+        if self._obligations_selected_entity is not None:
+            _et, _eid = self._obligations_selected_entity
+            sel_invoice_id = _eid
+        lv.clear()
+        if not matching:
+            lv.append(ListItem(Label("(no obligations matching current filters)")))
+            self._update_obligations_action_buttons()
+            return
+        new_index = 0
+        for i, inv in enumerate(matching):
+            label_text = self._format_obligation_row(inv)
+            lv.append(ListItem(Label(label_text)))
+            if sel_invoice_id == inv["invoice_id"]:
+                new_index = i
+        if sel_invoice_id and any(
+            inv["invoice_id"] == sel_invoice_id for inv in matching
+        ):
+            try:
+                lv.index = new_index
+            except Exception:
+                pass
+        self._update_obligations_action_buttons()
+
+    def _update_obligations_action_buttons(self) -> None:
+        """Spec 73 §R6: action buttons disabled when no actionable selection."""
+        sel = self._obligations_selected_entity
+        invoice = None
+        if sel is not None:
+            _et, eid = sel
+            invoice = self._invoices.get(eid)
+        actionable = invoice is not None and invoice.get("payable", True) and not (
+            self._resolutions.get(invoice.get("invoice_id"))
+            and self._resolutions[invoice["invoice_id"]].get("final_status") == "paid"
+        )
+        for bid in ("btn-pay-now", "btn-hold", "btn-release-hold"):
+            try:
+                btn = self.query_one(f"#{bid}", Button)
+                btn.disabled = not actionable
+            except Exception:
+                pass
+
+    def _filtered_messages(self) -> list[dict]:
+        try:
             sev_sel = self.query_one("#messages-severity-select", Select)
             agent_sel = self.query_one("#messages-agent-select", Select)
             read_sel = self.query_one("#messages-read-select", Select)
         except Exception:
-            return
+            return []
         severity_filter = sev_sel.value
         agent_filter = agent_sel.value
-        read_filter = read_sel.value  # "all" | "unread"
-
-        lines: list[str] = []
+        read_filter = read_sel.value
+        out: list[dict] = []
         for msg in self._messages:
             if severity_filter and severity_filter != "__all__":
                 if msg.get("severity") != severity_filter:
@@ -1290,22 +1631,72 @@ class MogulApp(App):
                     continue
             if read_filter == "unread" and msg.get("read"):
                 continue
+            out.append(msg)
+        return out
+
+    def _refresh_messages(self) -> None:
+        """Spec 60 §View F + spec 73 §R7: populate ListView; recompute action
+        button disabled state (selection-scoped + correlation-aware)."""
+        try:
+            lv = self.query_one("#messages-list", ListView)
+        except Exception:
+            return
+        filtered = self._filtered_messages()
+        sel_id = self._messages_selected_id
+        lv.clear()
+        if not filtered:
+            lv.append(ListItem(Label("(no messages matching current filters)")))
+            self._update_messages_action_buttons()
+            return
+        new_index = 0
+        for i, msg in enumerate(filtered):
             severity = msg.get("severity", "info")
-            color = {"info": "cyan", "warning": "yellow", "critical": "red"}.get(severity, "cyan")
+            color = {"info": "cyan", "warning": "yellow", "critical": "red"}.get(
+                severity, "cyan"
+            )
             correlated = msg.get("invoice_id") or msg.get("settlement_demand_id") or "-"
             read_mark = " [dim](read)[/]" if msg.get("read") else ""
-            sel_mark = (" [reverse]◀ SELECTED[/]"
-                        if msg.get("message_id") == self._messages_selected_id
-                        else "")
-            lines.append(
-                f"[{color}]{severity}[/] {msg.get('message_type')} "
-                f"agent={msg.get('agent_id')} entity={correlated} "
-                f"· {msg.get('body', '')}{read_mark}{sel_mark}"
+            label_text = (
+                f"[{color}]●[/] {severity} · {msg.get('message_type')} "
+                f"· agent={msg.get('agent_id')} · entity={correlated} "
+                f"· {msg.get('body', '')}{read_mark}"
             )
-        if not lines:
-            widget.update("(no messages matching current filters)")
+            lv.append(ListItem(Label(label_text)))
+            if msg.get("message_id") == sel_id:
+                new_index = i
+        if sel_id and any(m.get("message_id") == sel_id for m in filtered):
+            try:
+                lv.index = new_index
+            except Exception:
+                pass
+        self._update_messages_action_buttons()
+
+    def _selected_message(self) -> Optional[dict]:
+        sid = self._messages_selected_id
+        if sid is None:
+            return None
+        for m in self._messages:
+            if m.get("message_id") == sid:
+                return m
+        return None
+
+    def _update_messages_action_buttons(self) -> None:
+        """Spec 73 §R7: mark-read disabled with no selection; drill-through
+        additionally disabled when selected message has no correlation."""
+        msg = self._selected_message()
+        try:
+            mark_read_btn = self.query_one("#btn-messages-mark-read", Button)
+            drill_btn = self.query_one("#btn-messages-drill", Button)
+        except Exception:
             return
-        widget.update("\n".join(lines))
+        if msg is None:
+            mark_read_btn.disabled = True
+            drill_btn.disabled = True
+            return
+        mark_read_btn.disabled = False
+        # Drill-through requires correlation entity.
+        has_corr = bool(msg.get("invoice_id") or msg.get("settlement_demand_id"))
+        drill_btn.disabled = not has_corr
 
     def _refresh_agent_selectors(self, snap: dict) -> None:
         """Populate obligation + message agent filters from snapshot vendors."""
@@ -1390,29 +1781,33 @@ class MogulApp(App):
                 self._log_control_response("speed", r)
             elif bid in ("btn-pay-now", "btn-hold", "btn-release-hold"):
                 # Spec 33 §Operator action binding: actions target invoice_id /
-                # settlement_demand_id. TUI uses the locally-selected entity.
+                # settlement_demand_id. TUI keeps local selection keyed by
+                # invoice_id (see on_list_view_selected) and POSTs with the
+                # invoice path consistently. The engine API still accepts
+                # demand-id targeting (covered by engine tests) — the TUI just
+                # uses one consistent key for its own state.
                 sel = self._obligations_selected_entity
                 if sel is None:
                     self._log_line(
                         "[red]action rejected locally: no entity selected (spec 33)[/]"
                     )
                     return
-                entity_type, entity_id = sel
+                _entity_type, invoice_id = sel
                 action_route = {
                     "btn-pay-now": "pay_now",
                     "btn-hold": "hold",
                     "btn-release-hold": "release_hold",
                 }[bid]
                 # Enforce non-payable rule client-side too (spec 60 §View E).
-                inv = self._invoices.get(entity_id)
+                inv = self._invoices.get(invoice_id)
                 if inv is not None and not inv.get("payable", True):
                     self._log_line(
                         "[red]action rejected locally: entity is non-payable[/]"
                     )
                     return
                 await self._http.post(f"/actions/{action_route}", json={
-                    "entity_type": entity_type,
-                    "entity_id": entity_id,
+                    "entity_type": "invoice",
+                    "entity_id": invoice_id,
                 })
             elif bid == "btn-messages-mark-read":
                 if self._messages_selected_id is None:
@@ -1423,8 +1818,9 @@ class MogulApp(App):
                 self._refresh_messages()
             elif bid == "btn-messages-drill":
                 # Drill-through: select the correlated entity in Obligations
-                # (spec 60 §View F: "drill-through from correlated message to
-                # Obligations view with referenced entity pre-selected").
+                # (spec 60 §View F). Local selection is invoice-keyed (see
+                # on_list_view_selected) so we resolve a settlement_demand_id
+                # correlation back to its invoice_id before selecting.
                 sel_msg = None
                 for msg in self._messages:
                     if msg.get("message_id") == self._messages_selected_id:
@@ -1432,18 +1828,25 @@ class MogulApp(App):
                         break
                 if sel_msg is None:
                     return
-                eid = sel_msg.get("invoice_id") or sel_msg.get("settlement_demand_id")
-                if eid is None:
+                target_invoice_id: Optional[str] = sel_msg.get("invoice_id")
+                entity_type = "invoice"
+                if target_invoice_id is None and sel_msg.get("settlement_demand_id"):
+                    demand_id = sel_msg["settlement_demand_id"]
+                    # Find the invoice that aggregates this demand id.
+                    for inv_id, inv in self._invoices.items():
+                        if (inv.get("settlement_demand_id") == demand_id
+                                or demand_id == inv.get("invoice_id")):
+                            target_invoice_id = inv_id
+                            entity_type = "settlement_demand"
+                            break
+                if target_invoice_id is None:
                     self._log_line(
                         "[yellow]message has no correlated obligation entity[/]"
                     )
                     return
-                entity_type = "invoice" if sel_msg.get("invoice_id") else "settlement_demand"
-                self._obligations_selected_entity = (entity_type, eid)
-                # Switch tab to Obligations + refresh.
                 self._switch_tab("tab-obligations")
-                self._refresh_selection_display()
-                self._refresh_obligations()
+                # select_obligation_entity does refresh + button update.
+                self.select_obligation_entity(entity_type, target_invoice_id)
             elif bid in ("btn-open-ob", "btn-close-ob", "btn-open-tx", "btn-close-tx"):
                 ctype = {
                     "btn-open-ob": "OpenOnboarding",

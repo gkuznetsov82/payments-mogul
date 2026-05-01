@@ -170,7 +170,14 @@ class _OpenPayable:
     invoice_issue_date: _date_t
     payment_due_date: _date_t
     fee_id: Optional[str]
+    # Representative (canonical/sorted-first) settlement_demand_id when the
+    # invoice aggregates demands.
     settlement_demand_id: Optional[str]
+    # All component settlement_demand_ids folded into this invoice. Spec 73 §R4
+    # requires operator actions by settlement_demand_id to resolve
+    # deterministically even when the operator references a non-canonical
+    # component id.
+    component_settlement_demand_ids: tuple[str, ...] = ()
     # Which profile / product owns the source_container_ref for payment
     # execution (i.e. the payer's product, resolved through their
     # settlement_payment_policies).
@@ -318,19 +325,15 @@ class PipelineExecutor:
                         is_sink=is_sink,
                         opening_amount=0.0,
                     )
-                    # Apply opening amount as an immediate credit so it's
-                    # reflected in balance() immediately.
+                    # Apply opening amount AS opening_balance + current_balance
+                    # so spec 52 §Container balance visibility contract reports
+                    # both authoritative current and original opening amounts.
                     if ob.opening_amount:
-                        # Use a sentinel value_date in the past so apply is immediate.
-                        from datetime import date as _d
-                        self.balance_store.credit(
-                            product_id=product.product_id,
-                            container_ref=ob.container_ref,
-                            amount=float(ob.opening_amount),
-                            value_date=_d.min,
-                            simulation_date=_d.max,
-                            reason="opening_balance",
-                        )
+                        c_obj = self.balance_store._containers[
+                            (product.product_id, ob.container_ref)
+                        ]
+                        c_obj.current_balance = float(ob.opening_amount)
+                        c_obj.opening_balance = float(ob.opening_amount)
 
     @staticmethod
     def _index_profiles(cfg: PrototypeConfig) -> dict[str, PipelineProfileConfig]:
@@ -409,7 +412,20 @@ class PipelineExecutor:
         # intents contribute (spec 33 v4 §Root intent success-gating).
         local_trigger_amounts: dict[str, tuple[int, float]] = {}
 
+        # ADR-0003 §2: pipeline routes Pop-generated intents 1:1; it does NOT
+        # synthesize new economic intent families from outcomes. Match the
+        # outcome's `intent_kind` (Pop-tagged) to the corresponding intent_cfg.
+        # Convention: intent_id containing the substring "refund" is the
+        # refund-kind contract; otherwise it's the purchase-kind contract.
+        outcome_kind = getattr(outcome, "intent_kind", "purchase")
+
         for root_cfg in sorted(profile.transaction_intents, key=lambda i: i.intent_id):
+            cfg_is_refund = "refund" in root_cfg.intent_id.lower()
+            cfg_kind = "refund" if cfg_is_refund else "purchase"
+            if cfg_kind != outcome_kind:
+                continue
+            if txn_count == 0 and amount == 0:
+                continue
             plan = self._plan_root(
                 root_cfg=root_cfg,
                 profile=profile,
@@ -796,8 +812,9 @@ class PipelineExecutor:
                              simulation_date, trigger_amounts, fee_amounts, cal)
 
         for rule in profile.asset_transfer_rules:
-            self._maybe_transfer(rule, profile, owning_product, resolver, tick_id,
-                                 simulation_date, trigger_amounts, fee_amounts, cal)
+            self._maybe_transfer(rule, profile, owning_product, owning_vendor_id,
+                                 resolver, tick_id, simulation_date,
+                                 trigger_amounts, fee_amounts, cal)
 
     # ------------------------------------------------------------------ fee / posting / transfer
 
@@ -1050,12 +1067,18 @@ class PipelineExecutor:
                         rule: AssetTransferRuleConfig,
                         profile: PipelineProfileConfig,
                         owning_product: GenericProduct,
+                        owning_vendor_id: str,
                         resolver: RoleResolver,
                         tick_id: int,
                         simulation_date: _date_t,
                         trigger_amounts: dict[str, tuple[int, float]],
                         fee_amounts: dict[str, tuple[int, float]],
                         calendar: Optional[Calendar]) -> None:
+        """Spec 33 §AssetTransfer + spec 40 §Container balance handling (v4):
+        transfer execution reads/writes source and destination container
+        balances with non-sink >=0 enforcement. All-or-nothing: insufficient
+        funds emits a failed value_transfer_event with reason code and
+        does NOT mutate balances."""
         amt = self._amount_for_trigger(rule.trigger_id, rule.amount_basis,
                                        trigger_amounts, fee_amounts)
         if amt is None:
@@ -1072,8 +1095,67 @@ class PipelineExecutor:
         except Exception:
             v_date = simulation_date
         sim = self.cfg.simulation
+        rounded_amount = round_amount(amt, sim.amount_scale_dp, sim.amount_rounding_mode)
+
+        # For same-profile transfers both source and destination containers are
+        # owned by `owning_product`; spec 52 §value_transfer_event requires
+        # explicit source/destination ownership for Accounts attribution.
+        source_product_id = owning_product.product_id
+        source_agent_id = owning_vendor_id
+        destination_product_id = owning_product.product_id
+        destination_agent_id = owning_vendor_id
+
+        transfer_id = f"xfer_{profile.pipeline_profile_id}_{rule.trigger_id}_{tick_id}"
+
+        # Attempt debit against the source container (all-or-nothing; non-sink
+        # enforced by balance store).
+        accepted, reason = self.balance_store.try_debit(
+            product_id=source_product_id,
+            container_ref=rule.source_container_ref,
+            amount=rounded_amount,
+            value_date=v_date,
+            simulation_date=simulation_date,
+            reason=f"transfer_rule:{rule.trigger_id}",
+        )
+        if not accepted:
+            # Spec 52: failed transfer must carry explicit reason + failed status.
+            failed = AssetTransfer(
+                transfer_id=transfer_id,
+                tick_id=tick_id,
+                simulation_date=simulation_date,
+                pipeline_profile_id=profile.pipeline_profile_id,
+                product_id=owning_product.product_id,
+                trigger_id=rule.trigger_id,
+                source_container_ref=rule.source_container_ref,
+                destination_container_ref=rule.destination_container_ref,
+                source_container_path=src,
+                destination_container_path=dst,
+                amount=rounded_amount,
+                currency=self.default_currency,
+                value_date_policy=rule.value_date_policy,
+                resolved_value_date=v_date,
+                status="failed",
+                source_product_id=source_product_id,
+                source_agent_id=source_agent_id,
+                destination_product_id=destination_product_id,
+                destination_agent_id=destination_agent_id,
+                reason_code=reason,
+            )
+            self._emit_transfer(failed)
+            return
+
+        # Debit succeeded; symmetric credit to destination.
+        self.balance_store.credit(
+            product_id=destination_product_id,
+            container_ref=rule.destination_container_ref,
+            amount=rounded_amount,
+            value_date=v_date,
+            simulation_date=simulation_date,
+            reason=f"transfer_rule:{rule.trigger_id}",
+        )
+
         transfer = AssetTransfer(
-            transfer_id=f"xfer_{profile.pipeline_profile_id}_{rule.trigger_id}_{tick_id}",
+            transfer_id=transfer_id,
             tick_id=tick_id,
             simulation_date=simulation_date,
             pipeline_profile_id=profile.pipeline_profile_id,
@@ -1083,11 +1165,15 @@ class PipelineExecutor:
             destination_container_ref=rule.destination_container_ref,
             source_container_path=src,
             destination_container_path=dst,
-            amount=round_amount(amt, sim.amount_scale_dp, sim.amount_rounding_mode),
+            amount=rounded_amount,
             currency=self.default_currency,
             value_date_policy=rule.value_date_policy,
             resolved_value_date=v_date,
             status="executed",
+            source_product_id=source_product_id,
+            source_agent_id=source_agent_id,
+            destination_product_id=destination_product_id,
+            destination_agent_id=destination_agent_id,
         )
         self._emit_transfer(transfer)
 
@@ -1356,9 +1442,14 @@ class PipelineExecutor:
             self._emit_invoice(invoice)
             if not payable:
                 continue
-            self._register_open_payable(invoice)
+            self._register_open_payable(
+                invoice,
+                component_demand_ids=tuple(sorted(group.component_demand_ids)),
+            )
 
-    def _register_open_payable(self, invoice: InvoiceEvent) -> None:
+    def _register_open_payable(self,
+                                invoice: InvoiceEvent,
+                                component_demand_ids: tuple[str, ...] = ()) -> None:
         """Look up the payer's settlement_payment_policy to resolve where to
         debit from, then track the invoice in _open_payables for autopay."""
         payer_source = self._resolve_payer_source(
@@ -1380,6 +1471,7 @@ class PipelineExecutor:
             payment_due_date=invoice.payment_due_date,
             fee_id=invoice.fee_id,
             settlement_demand_id=invoice.settlement_demand_id,
+            component_settlement_demand_ids=component_demand_ids,
             payer_source_profile_id=payer_source[0] if payer_source else None,
             payer_source_product_id=payer_source[1] if payer_source else None,
             payer_source_container_ref=payer_source[2] if payer_source else None,
@@ -1600,6 +1692,11 @@ class PipelineExecutor:
         )
         src_path = src_container.path if src_container else payable.payer_source_container_ref
 
+        # Spec 52 §value_transfer_event: include explicit source/destination
+        # ownership (spec 73 §7 "Accounts attribution matches destination
+        # ownership rather than payer-only ownership").
+        source_agent_id = _vendor_of_product(self.model, payable.payer_source_product_id)
+        destination_agent_id = payable.creditor_agent_id
         transfer = AssetTransfer(
             transfer_id=transfer_id,
             tick_id=tick_id,
@@ -1616,6 +1713,10 @@ class PipelineExecutor:
             value_date_policy="same_day",
             resolved_value_date=simulation_date,
             status="executed",
+            source_product_id=payable.payer_source_product_id,
+            source_agent_id=source_agent_id,
+            destination_product_id=dest_product_id,
+            destination_agent_id=destination_agent_id,
         )
         self._emit_transfer(transfer)
 
@@ -1714,33 +1815,110 @@ class PipelineExecutor:
             "body": body,
         })
 
-    def request_hold(self, entity_id: str) -> dict:
-        """Operator action: hold on invoice_id / settlement_demand_id. Returns
-        ack dict suitable for SSE emission by the caller (engine)."""
-        exists = entity_id in self._open_payables
-        self._holds.add(entity_id)
-        return {"action": "hold", "entity_id": entity_id,
-                "accepted": True, "entity_known": exists}
+    def _resolve_action_target(self,
+                                entity_type: str,
+                                entity_id: str) -> tuple[Optional[_OpenPayable], str, Optional[str]]:
+        """Spec 73 §R4: resolve an operator action's target entity.
 
-    def request_release_hold(self, entity_id: str) -> dict:
-        self._holds.discard(entity_id)
-        return {"action": "release_hold", "entity_id": entity_id,
-                "accepted": True, "entity_known": entity_id in self._open_payables}
+        Returns `(payable, target_key, rejection_reason)`:
+          - `payable`: the resolved _OpenPayable, or None on failure.
+          - `target_key`: the key the operator used ("invoice_id" or
+            "settlement_demand_id").
+          - `rejection_reason`: unknown-target / ambiguous-target / None.
 
-    def request_pay_now(self, entity_id: str) -> dict:
-        """Mark an entity to be paid immediately on the next tick."""
-        payable = self._open_payables.get(entity_id)
+        Resolution rules:
+          - entity_type="invoice": direct lookup by invoice_id.
+          - entity_type="settlement_demand": scan _open_payables for the
+            payable whose settlement_demand_id matches OR whose
+            component_settlement_demand_ids contains entity_id. If multiple
+            match (possible across different issue dates), pick the earliest
+            (payment_due_date, invoice_issue_date, invoice_id) for deterministic
+            behavior.
+        """
+        if entity_type == "invoice":
+            payable = self._open_payables.get(entity_id)
+            if payable is None:
+                return None, "invoice_id", "entity_not_open"
+            return payable, "invoice_id", None
+        if entity_type == "settlement_demand":
+            matches: list[_OpenPayable] = []
+            for p in self._open_payables.values():
+                if p.invoice_category != "settlement_demand":
+                    continue
+                if p.settlement_demand_id == entity_id:
+                    matches.append(p)
+                elif entity_id in p.component_settlement_demand_ids:
+                    matches.append(p)
+            if not matches:
+                return None, "settlement_demand_id", "entity_not_open"
+            if len(matches) > 1:
+                matches.sort(key=lambda p: (p.payment_due_date, p.invoice_issue_date,
+                                              p.invoice_id))
+            return matches[0], "settlement_demand_id", None
+        return None, entity_type, "invalid_entity_type"
+
+    def _action_ack_base(self,
+                         action: str,
+                         entity_type: str,
+                         entity_id: str,
+                         payable: Optional[_OpenPayable],
+                         target_key: str,
+                         rejection_reason: Optional[str]) -> dict:
+        """Spec 52 §Message and action ack: ack payload must state which key
+        was used and whether target resolution succeeded."""
+        target_invoice_id = payable.invoice_id if payable is not None else None
+        return {
+            "action": action,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "target_key": target_key,
+            "target_resolved": payable is not None,
+            "target_invoice_id": target_invoice_id,
+            "entity_known": payable is not None,
+            "rejection_reason": rejection_reason,
+        }
+
+    def request_hold(self, entity_type: str, entity_id: str) -> dict:
+        """Operator action: hold on invoice_id / settlement_demand_id."""
+        payable, target_key, reason = self._resolve_action_target(entity_type, entity_id)
+        ack = self._action_ack_base("hold", entity_type, entity_id,
+                                     payable, target_key, reason)
         if payable is None:
-            return {"action": "pay_now", "entity_id": entity_id,
-                    "accepted": False, "entity_known": False,
-                    "rejection_reason": "entity_not_open"}
+            ack["accepted"] = False
+            return ack
+        self._holds.add(payable.invoice_id)
+        ack["accepted"] = True
+        ack["rejection_reason"] = None
+        return ack
+
+    def request_release_hold(self, entity_type: str, entity_id: str) -> dict:
+        payable, target_key, reason = self._resolve_action_target(entity_type, entity_id)
+        ack = self._action_ack_base("release_hold", entity_type, entity_id,
+                                     payable, target_key, reason)
+        if payable is None:
+            ack["accepted"] = False
+            return ack
+        self._holds.discard(payable.invoice_id)
+        ack["accepted"] = True
+        ack["rejection_reason"] = None
+        return ack
+
+    def request_pay_now(self, entity_type: str, entity_id: str) -> dict:
+        """Mark an entity to be paid immediately on the next tick."""
+        payable, target_key, reason = self._resolve_action_target(entity_type, entity_id)
+        ack = self._action_ack_base("pay_now", entity_type, entity_id,
+                                     payable, target_key, reason)
+        if payable is None:
+            ack["accepted"] = False
+            return ack
         if payable.resolved:
-            return {"action": "pay_now", "entity_id": entity_id,
-                    "accepted": False, "entity_known": True,
-                    "rejection_reason": "already_resolved"}
-        self._pending_pay_now.add(entity_id)
-        return {"action": "pay_now", "entity_id": entity_id,
-                "accepted": True, "entity_known": True}
+            ack["accepted"] = False
+            ack["rejection_reason"] = "already_resolved"
+            return ack
+        self._pending_pay_now.add(payable.invoice_id)
+        ack["accepted"] = True
+        ack["rejection_reason"] = None
+        return ack
 
     # ------------------------------------------------------------------ intent materialization
 
@@ -1925,6 +2103,7 @@ class PipelineExecutor:
             "tick_id": t.tick_id,
             "simulation_date": t.simulation_date.isoformat(),
             "pipeline_profile_id": t.pipeline_profile_id,
+            # `product_id` kept for back-compat (owning product / audit lens).
             "product_id": t.product_id,
             "trigger_id": t.trigger_id,
             "transfer_id": t.transfer_id,
@@ -1936,6 +2115,14 @@ class PipelineExecutor:
             "value_date_policy": t.value_date_policy,
             "resolved_value_date": t.resolved_value_date.isoformat(),
             "status": t.status,
+            # Spec 52 §value_transfer_event: explicit ownership on both sides
+            # for correct Accounts attribution (spec 73 §7).
+            "source_product_id": t.source_product_id or t.product_id,
+            "source_agent_id": t.source_agent_id,
+            "destination_product_id": t.destination_product_id or t.product_id,
+            "destination_agent_id": t.destination_agent_id,
+            # Failure reason present iff status == "failed".
+            "reason_code": t.reason_code,
         })
 
     def _emit_invoice(self, i: InvoiceEvent) -> None:

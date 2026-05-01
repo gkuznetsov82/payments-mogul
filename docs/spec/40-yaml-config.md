@@ -101,6 +101,7 @@ This section locks a **minimal YAML contract** for the first runnable vertical s
 - `daily_active` (`float`, `0..1`)
 - `daily_transact_count` (`number`, `>= 0`)
 - `daily_transact_amount` (`number`, `>= 0`)
+- `refund_to_purchase_ratio` (`float`, `0..1`) - Pop behavior knob for refund-intent generation as a share of purchase volume.
 - `product_links` (`array[object]`, min length 1)
 
 `product_links[]` item:
@@ -166,6 +167,7 @@ world:
       daily_active: 0.40
       daily_transact_count: 1.2
       daily_transact_amount: 22.5
+      refund_to_purchase_ratio: 0.01
       product_links:
         - vendor_id: "vendor_alpha"
           product_id: "prod_prepaid_alpha"
@@ -325,6 +327,10 @@ This section formalizes transaction-pipeline config contracts. Binding depends o
   - `pipeline_profile_id` (`string`, unique)
   - `transaction_intents` (`array[object]`) - incoming intent contract definitions:
   - `intent_id` (`string`, unique)
+  - `transaction_intents[]` is a routing/execution contract, not a behavior-generation contract.
+  - prohibited behavior-generation fields under `transaction_intents[]` include:
+    - `source_volume_ratio`
+    - or any equivalent ratio/coefficient intended to synthesize new economic intent families from prior outcomes
   - `destinations` (`array[object]`)
     - `destination_role` (`string`) - symbolic role resolved at product instance level (or `local`)
     - `outgoing_intent_id` (`string`)
@@ -445,6 +451,12 @@ Role resolution is owned by the product instance so the same pipeline profile ca
     - `currency` (`string`, ISO 4217 alpha-3)
 
 All role placeholders in pipeline path patterns and routing destinations must be resolvable from this mapping.
+
+#### Agency boundary for config authoring (required)
+
+- Per **ADR-0003**, behavior-generation knobs belong under Pop authoring surfaces (`world.pops[]`), not under pipeline contracts.
+- Pipeline profiles define how already-generated intents are validated/routed/executed; they must not define behavior-generation formulas.
+- Refund behavior generation is Pop-owned and configured via `world.pops[].refund_to_purchase_ratio`.
 
 #### Inter-product `Transact()` handoff contract
 
@@ -764,6 +776,7 @@ world:
       daily_transact_amount:
         amount: 22.5
         currency: "USD"
+      refund_to_purchase_ratio: 0.01
       product_links:
         - vendor_id: "vendor_alpha"
           product_id: "prod_prepaid_alpha"
@@ -849,6 +862,8 @@ pipeline:
 - `routing_completion_mode` on destinations defines root-blocking (`synchronous`) vs deferred (`asynchronous`) fan-out behavior.
 - Settlement-demand sequences are separate from fee sequences and may reverse creditor/debtor direction by net flow.
 - Lifecycle date fields are explicit (`accrual_date`, `invoice_issue_date`, `payment_due_date`) and must not be conflated.
+- Pipeline `transaction_intents[]` is transport/routing-only and must not include behavior-generation coefficients (for example `source_volume_ratio`).
+- Pop behavior knobs include `world.pops[].refund_to_purchase_ratio` for refund-intent generation policy.
 - Example YAML files exist for currency catalog, local FX rates, and local calendar holiday overlays.
 
 ### Deferred beyond v0

@@ -46,7 +46,11 @@ pipeline:
               amount_basis: "transaction_intent_amount"
               currency_mode: "inherit"
               routing_completion_mode: "synchronous"
-        # Refund leg (~1% of purchase volume via demand amount_percentage).
+        # Refund leg routing/execution contract only. Per ADR-0003, behavior-
+        # generation knobs live on Pop (`world.pops[].refund_to_purchase_ratio`)
+        # — pipeline must NOT carry source_volume_ratio or any equivalent
+        # coefficient (spec 40 §pipeline + spec 50
+        # §E_PIPELINE_BEHAVIOR_FIELD_FORBIDDEN).
         - intent_id: "Transact-Purchase-Refund-Clearing"
           destinations:
             - destination_role: "scheme_access_product"
@@ -68,23 +72,48 @@ pipeline:
           path_pattern: "[Funds][{product_role}][Customer]"
         - ledger_ref: "settlement_funds"
           path_pattern: "[Funds][{product_role}][Settlement]"
+        - ledger_ref: "own_funds"
+          path_pattern: "[Funds][OwnFunds][{self_agent}]"
       posting_rules:
         - trigger_id: "Transact-Purchase-Clearing"
           source_ledger_ref: "customer_funds"
           destination_ledger_ref: "settlement_funds"
           amount_basis: "transaction_intent_amount"
           value_date_policy: "same_day"
+        - trigger_id: "Transact-Purchase-Refund-Clearing"
+          source_ledger_ref: "settlement_funds"
+          destination_ledger_ref: "customer_funds"
+          amount_basis: "transaction_intent_amount"
+          value_date_policy: "same_day"
+        - trigger_id: "fee_issuer_cardholder_2pct"
+          source_ledger_ref: "settlement_funds"
+          destination_ledger_ref: "own_funds"
+          amount_basis: "fee_amount"
+          value_date_policy: "same_day"
       value_container_construction:
         - container_ref: "customer_funds_container"
           path_pattern: "[Container][{product_role}][Customer]"
         - container_ref: "settlement_funds_container"
           path_pattern: "[Container][{product_role}][Settlement]"
+        - container_ref: "own_funds_container"
+          path_pattern: "[Container][Own-Funds][{self_agent}]"
       asset_transfer_rules:
         - trigger_id: "Transact-Purchase-Clearing"
           source_container_ref: "customer_funds_container"
           destination_container_ref: "settlement_funds_container"
           amount_basis: "transaction_intent_amount"
           value_date_policy: "same_day"
+        - trigger_id: "Transact-Purchase-Refund-Clearing"
+          source_container_ref: "settlement_funds_container"
+          destination_container_ref: "customer_funds_container"
+          amount_basis: "transaction_intent_amount"
+          value_date_policy: "same_day"
+        - trigger_id: "fee_issuer_cardholder_2pct"
+          source_container_ref: "settlement_funds_container"
+          destination_container_ref: "own_funds_container"
+          amount_basis: "fee_amount"
+          value_date_policy: "same_day"
+          value_date_offset_days: 0
       fee_sequences:
         - sequence_id: "issuer_cardholder_fee_sequence"
           fees:
@@ -95,8 +124,8 @@ pipeline:
               beneficiary_product_role: "product_role"
               payer_role: "cardholder_counterparty"
               non_payable_statement: true
-              invoice_issue_date_policy: "same_day"
-              invoice_issue_date_offset_days: 0
+              invoice_issue_date_policy: "next_month_day_plus_x"
+              invoice_issue_date_offset_days: 1
               payment_due_date_policy: "same_day"
               payment_due_date_offset_days: 0
               settlement_value_date_policy: "same_day"
@@ -106,7 +135,7 @@ pipeline:
       settlement_demand_sequences: []
       settlement_payment_policies:
         - applies_to_category: "fee"
-          source_container_ref: "settlement_funds_container"
+          source_container_ref: "own_funds_container"
           auto_pay_enabled: true
           hold_default: false
         - applies_to_category: "settlement_demand"
@@ -125,6 +154,12 @@ pipeline:
           path_pattern: "[Receivables][{self_product}][From-{payer_role}]"
       posting_rules:
         - trigger_id: "fee_scheme_access"
+          source_ledger_ref: "scheme_fee_receivable"
+          destination_ledger_ref: "scheme_fee_receivable"
+          amount_basis: "fee_amount"
+          value_date_policy: "next_month_day_plus_x"
+          value_date_offset_days: 5
+        - trigger_id: "fee_scheme_access_refund"
           source_ledger_ref: "scheme_fee_receivable"
           destination_ledger_ref: "scheme_fee_receivable"
           amount_basis: "fee_amount"
@@ -153,6 +188,21 @@ pipeline:
                 amount: 0.01
                 currency: "USD"
               amount_percentage: 0.0015
+            - fee_id: "fee_scheme_access_refund"
+              trigger_ids: ["Transact-Purchase-Refund-Scheme"]
+              beneficiary_role: "self_agent"
+              beneficiary_product_role: "self_product"
+              payer_role: "payer_role"
+              invoice_issue_date_policy: "next_month_day_plus_x"
+              invoice_issue_date_offset_days: 0
+              payment_due_date_policy: "next_month_day_plus_x"
+              payment_due_date_offset_days: 5
+              settlement_value_date_policy: "next_month_day_plus_x"
+              settlement_value_date_offset_days: 5
+              settlement_trigger_event: "invoice_transaction_event"
+              count_cost:
+                amount: 0.01
+                currency: "USD"
       settlement_demand_sequences:
         - sequence_id: "scheme_settlement_demand_sequence"
           settlement_demands:
@@ -161,21 +211,23 @@ pipeline:
               creditor_role: "self_agent"
               debtor_role: "payer_role"
               invoice_category: "settlement_demand"
-              invoice_issue_date_policy: "next_working_day_plus_x"
+              invoice_issue_date_policy: "same_day"
               invoice_issue_date_offset_days: 0
               payment_due_date_policy: "next_working_day_plus_x"
-              payment_due_date_offset_days: 2
+              payment_due_date_offset_days: 0
               amount_percentage: 1.0
+            # Refund direction: source-derived; demand accrues 100% of refund
+            # intent's already-scaled volume (spec 73 §R1).
             - settlement_demand_id: "sd_scheme_refund_clearing"
               trigger_ids: ["Transact-Purchase-Refund-Scheme"]
               creditor_role: "payer_role"
               debtor_role: "self_agent"
               invoice_category: "settlement_demand"
-              invoice_issue_date_policy: "next_working_day_plus_x"
+              invoice_issue_date_policy: "same_day"
               invoice_issue_date_offset_days: 0
               payment_due_date_policy: "next_working_day_plus_x"
-              payment_due_date_offset_days: 2
-              amount_percentage: 0.01
+              payment_due_date_offset_days: 0
+              amount_percentage: 1.0
       settlement_payment_policies:
         - applies_to_category: "settlement_demand"
           source_container_ref: "scheme_settlement_container"
@@ -203,7 +255,7 @@ pipeline:
         - sequence_id: "processor_fee_sequence"
           fees:
             - fee_id: "fee_processor_services"
-              trigger_ids: ["Transact-Purchase-Clearing-Processor"]
+              trigger_ids: ["Transact-Purchase-Clearing-Processor", "Transact-Purchase-Refund-Processor"]
               beneficiary_role: "self_agent"
               beneficiary_product_role: "self_product"
               payer_role: "payer_role"
@@ -245,12 +297,16 @@ world:
               processor_services_product: { product_id: "prod_processor_services" }
               cardholder_counterparty: { agent_id: "vendor_alpha" }
             default_product_role: "product_role"
+            # Spec 73 §R2: balance enforcement applies to all asset_transfer
+            # paths now. customer_funds aggregates cardholder wallets; seed
+            # it generously so daily purchase clearing can debit without
+            # tripping insufficient-funds (non-sink products cannot go negative).
             value_container_balances:
               - container_ref: "settlement_funds_container"
                 opening_amount: 10000000.00
                 currency: "USD"
               - container_ref: "customer_funds_container"
-                opening_amount: 0.00
+                opening_amount: 100000000.00
                 currency: "USD"
     - vendor_id: "vendor_scheme"
       vendor_label: "Global Payment Scheme (Sink)"
@@ -290,6 +346,9 @@ world:
       daily_transact_amount:
         amount: 22.5
         currency: "USD"
+      # Spec 31 §Pop config + ADR-0003 §3: refund-intent generation is Pop-
+      # owned. Pop emits refund intents at this share of its purchase volume.
+      refund_to_purchase_ratio: 0.01
       product_links:
         - vendor_id: "vendor_alpha"
           product_id: "prod_prepaid_alpha"

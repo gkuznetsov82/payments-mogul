@@ -33,6 +33,11 @@ class ActionOutcome:
     failed_txn_count: float = 0.0
     successful_total_amount: float = 0.0
     failed_total_amount: float = 0.0
+    # ADR-0003 §1 + spec 31 §Pop config: Pop tags each Transact outcome with
+    # the intent kind it generated ("purchase" or "refund"). The pipeline
+    # uses this to route to the matching intent_cfg 1:1, never synthesizing
+    # new economic intent families on its own.
+    intent_kind: str = "purchase"
 
     def as_dict(self,
                 count_mode: str = "half_up",
@@ -54,6 +59,7 @@ class ActionOutcome:
             "failed_txn_count": round_count(self.failed_txn_count, count_mode),
             "successful_total_amount": round_amount(self.successful_total_amount, amount_scale_dp, amount_mode),
             "failed_total_amount": round_amount(self.failed_total_amount, amount_scale_dp, amount_mode),
+            "intent_kind": self.intent_kind,
         }
 
 
@@ -67,6 +73,10 @@ class GenericPop(mesa.Agent):
         self.daily_active = cfg.daily_active
         self.daily_transact_count = cfg.daily_transact_count
         self.daily_transact_amount = cfg.daily_transact_amount
+        # Spec 31 §Pop config + ADR-0003 §3: refund-intent generation is a
+        # Pop-owned behavior knob. Pop emits a separate refund outcome at
+        # this share of the realised purchase volume on the same tick.
+        self.refund_to_purchase_ratio = cfg.refund_to_purchase_ratio
         # vendor_id -> product_id -> ProductLinkState
         self.products: dict[str, dict[str, ProductLinkState]] = {}
         for link in cfg.product_links:
@@ -123,7 +133,20 @@ class GenericPop(mesa.Agent):
                 ))
 
     def Transact(self) -> None:
-        """Mesa step entrypoint: generate transact requests for links with onboarded stock."""
+        """Mesa step entrypoint: generate transact requests for links with onboarded stock.
+
+        Spec 31 §Pop methods + ADR-0003: Pop is the SOLE generator of root
+        economic transaction intents. Each tick this method emits:
+
+        - A purchase-clearing outcome (intent_kind="purchase") with volume
+          derived from `daily_active * daily_transact_count/_amount`.
+        - When `refund_to_purchase_ratio > 0`, an additional refund-clearing
+          outcome (intent_kind="refund") whose volume is the configured
+          share of the realised purchase volume. The refund is NOT a second
+          adjudication call into the product (purchase counters track
+          purchases only); it is a distinct economic intent emitted by Pop
+          for the pipeline to route 1:1 against the matching `intent_cfg`.
+        """
         tick_id = self.model.steps
         vendors = self.model.vendors
         for vendor_id in sorted(self.products.keys()):
@@ -137,6 +160,7 @@ class GenericPop(mesa.Agent):
                 active_count = link.onboarded_count * self.daily_active
                 requested_txn = active_count * self.daily_transact_count
                 requested_amt = active_count * self.daily_transact_amount
+                # 1) Purchase-clearing intent (Pop-generated).
                 result = vendor.handle_transact_from_pop(
                     self.pop_id, product_id, active_count, requested_txn, requested_amt
                 )
@@ -153,7 +177,29 @@ class GenericPop(mesa.Agent):
                     failed_txn_count=result.failed_txn_count,
                     successful_total_amount=result.successful_total_amount,
                     failed_total_amount=result.failed_total_amount,
+                    intent_kind="purchase",
                 ))
+                # 2) Refund-clearing intent (Pop-generated, ratio of realised
+                # purchase volume). ADR-0003 §3: Pop owns refund generation
+                # policy via `refund_to_purchase_ratio`.
+                ratio = float(self.refund_to_purchase_ratio)
+                if ratio > 0 and result.successful_txn_count > 0:
+                    refund_count = float(result.successful_txn_count) * ratio
+                    refund_amount = float(result.successful_total_amount) * ratio
+                    self.model.record_outcome(ActionOutcome(
+                        tick_id=tick_id,
+                        action_type="Transact",
+                        pop_id=self.pop_id,
+                        vendor_id=vendor_id,
+                        product_id=product_id,
+                        status="success",
+                        reason_code="OK_REFUND",
+                        successful_txn_count=refund_count,
+                        failed_txn_count=0.0,
+                        successful_total_amount=refund_amount,
+                        failed_total_amount=0.0,
+                        intent_kind="refund",
+                    ))
 
     def snapshot(self,
                  count_mode: str = "half_up",

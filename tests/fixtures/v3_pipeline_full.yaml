@@ -55,6 +55,10 @@ pipeline:
               currency_mode: "inherit"
               routing_completion_mode: "synchronous"
         - intent_id: "Transact-Purchase-Refund-Clearing"
+          # ADR-0003: pipeline transaction_intents[] is routing/execution-only.
+          # Refund volume is Pop-owned via world.pops[].refund_to_purchase_ratio.
+          # Pipeline behavior-generation fields (source_volume_ratio etc.)
+          # are forbidden and rejected at config load (E_PIPELINE_BEHAVIOR_FIELD_FORBIDDEN).
           destinations:
             - destination_role: "scheme_access_product"
               outgoing_intent_id: "Transact-Purchase-Refund-Scheme"
@@ -193,8 +197,10 @@ pipeline:
               payment_due_date_policy: "next_working_day_plus_x"
               payment_due_date_offset_days: 2
               amount_percentage: 1.0
-            # Refund direction: scheme owes Alpha the refunded portion (~1% of
-            # the purchase volume — exercises pair-netting at demand aggregation).
+            # Refund direction: scheme owes Alpha the refunded portion. Refund
+            # intent is already source-derived at ~1% of purchase volume
+            # (transaction_intents[].source_volume_ratio); the demand accrues
+            # at 100% of THAT smaller routed flow.
             - settlement_demand_id: "sd_scheme_refund_clearing"
               trigger_ids: ["Transact-Purchase-Refund-Scheme"]
               creditor_role: "payer_role"
@@ -204,7 +210,7 @@ pipeline:
               invoice_issue_date_offset_days: 0
               payment_due_date_policy: "next_working_day_plus_x"
               payment_due_date_offset_days: 2
-              amount_percentage: 0.01
+              amount_percentage: 1.0
       # Scheme pays outbound settlement-demand obligations (e.g. refunds net-owed)
       # from its own settlement container. Sink products allow negative balances.
       settlement_payment_policies:
@@ -278,12 +284,17 @@ world:
             default_product_role: "product_role"
             # Spec 40 §Container balance handling: Alpha opens its settlement
             # container with enough cushion to service autopayments.
+            # Spec 40 §Container balance handling: balance enforcement now
+            # applies to non-payment asset_transfer_rules too (spec 73 §R2).
+            # customer_funds represents the aggregate cardholder wallet — must
+            # be seeded so daily purchase clearing (customer→settlement) can
+            # debit; non-sink products cannot go negative.
             value_container_balances:
               - container_ref: "settlement_funds_container"
                 opening_amount: 1000000.00
                 currency: "USD"
               - container_ref: "customer_funds_container"
-                opening_amount: 0.00
+                opening_amount: 50000000.00
                 currency: "USD"
     - vendor_id: "vendor_scheme"
       vendor_label: "Global Payment Scheme (Sink)"
@@ -323,6 +334,8 @@ world:
       daily_transact_amount:
         amount: 22.5
         currency: "USD"
+      # ADR-0003 §3 + spec 31 §Pop config: Pop owns refund generation.
+      refund_to_purchase_ratio: 0.01
       product_links:
         - vendor_id: "vendor_alpha"
           product_id: "prod_prepaid_alpha"

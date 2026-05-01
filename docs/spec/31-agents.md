@@ -162,6 +162,7 @@ Pops are stock-flow objects representing aggregated segment mass, not individual
 - `daily_active` (`float`) - Share of onboarded population attempting activity per tick.
 - `daily_transact_count` (`number`) - Requested transaction count per active population unit.
 - `daily_transact_amount` (`number`) - Requested total amount per active population unit.
+- `refund_to_purchase_ratio` (`float`, `0..1`) - Pop behavior control for refund intent generation as a share of prior tick purchase intent volume.
 
 #### Methods
 
@@ -173,8 +174,20 @@ Pops are stock-flow objects representing aggregated segment mass, not individual
 - `Transact()` - Pop-owned transact request generation.
   - Iterates known links with non-zero onboarded stock.
   - Computes requested transacting population and transaction flow from `daily_active`, `daily_transact_count`, `daily_transact_amount`.
+  - Generates root transaction intents (including purchase/refund mixes) and assigns intent payload details before handing off to vendor/product handlers.
+  - Applies pop behavior knobs such as `refund_to_purchase_ratio` when producing refund intents.
   - Calls `VendorAgent.HandleTransactFromPop(...)`.
   - Records outcome summaries for diagnostics/realtime.
+
+#### Intent-generation authority boundary (normative)
+
+- Per **ADR-0003**, only agent classes may generate economic transaction intents.
+- "Generate" includes:
+  - deciding whether an intent exists,
+  - assigning transaction counts/amounts and directionality,
+  - assigning behavior-specific metadata needed by downstream processing.
+- Pipeline stages may route or transform transport envelopes for already-generated intents, but must not synthesize new economic behavior intents from other outcomes.
+- Pop subclasses may implement distinct behavior models; intent-generation authority remains inside Pop subclasses and must not move to pipeline configuration logic.
 
 ### External command boundary (prototype)
 

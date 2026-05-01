@@ -1,0 +1,611 @@
+:root {
+  --wb-bg: #0e1116;
+  --wb-panel: #161b22;
+  --wb-panel-2: #1f2630;
+  --wb-fg: #e6edf3;
+  --wb-muted: #7d8590;
+  --wb-accent: #58a6ff;
+  --wb-error: #f85149;
+  --wb-warn: #d29922;
+  --wb-ok: #3fb950;
+  --wb-border: #30363d;
+  --wb-focus: #ffd33d;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  background: var(--wb-bg);
+  color: var(--wb-fg);
+  font-size: 13px;
+}
+
+.wb-app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.wb-header {
+  padding: 10px 14px;
+  background: var(--wb-panel);
+  border-bottom: 1px solid var(--wb-border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.wb-header h1 {
+  margin: 0;
+  font-size: 14px;
+  letter-spacing: 0.5px;
+}
+
+.wb-meta { color: var(--wb-muted); }
+.wb-error { color: var(--wb-error); }
+
+.wb-toolbar {
+  padding: 8px 14px;
+  background: var(--wb-panel-2);
+  border-bottom: 1px solid var(--wb-border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.wb-toolbar button {
+  background: var(--wb-panel);
+  color: var(--wb-fg);
+  border: 1px solid var(--wb-border);
+  padding: 6px 10px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.wb-toolbar button:hover { border-color: var(--wb-accent); color: var(--wb-accent); }
+.wb-toolbar button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.wb-toolbar input[type="search"] {
+  background: var(--wb-bg);
+  color: var(--wb-fg);
+  border: 1px solid var(--wb-border);
+  padding: 5px 8px;
+  font-family: inherit;
+  min-width: 200px;
+}
+
+.wb-badge {
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  margin-left: auto;
+}
+
+.wb-badge-ok { background: var(--wb-ok); color: #000; }
+.wb-badge-fail { background: var(--wb-error); color: #fff; }
+.wb-badge-muted { background: var(--wb-panel-2); color: var(--wb-muted); border: 1px solid var(--wb-border); }
+
+.wb-main {
+  display: grid;
+  grid-template-columns: 280px 1fr 360px;
+  gap: 1px;
+  flex: 1;
+  background: var(--wb-border);
+  min-height: 0;
+}
+
+.wb-pane {
+  background: var(--wb-panel);
+  padding: 10px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.wb-pane h2 {
+  margin: 0 0 6px 0;
+  color: var(--wb-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-weight: 500;
+}
+
+.wb-pane h2:not(:first-child) { margin-top: 12px; }
+
+.wb-pane textarea {
+  flex: 1;
+  background: var(--wb-bg);
+  color: var(--wb-fg);
+  border: 1px solid var(--wb-border);
+  padding: 6px;
+  font-family: inherit;
+  font-size: 12px;
+  resize: vertical;
+  min-height: 120px;
+}
+
+.wb-pane-graph {
+  padding: 0;
+  overflow: hidden;
+}
+
+.wb-section-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wb-section {
+  background: transparent;
+  color: var(--wb-fg);
+  border: 1px solid transparent;
+  padding: 5px 8px;
+  cursor: pointer;
+  text-align: left;
+  display: flex;
+  justify-content: space-between;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.wb-section:hover { background: var(--wb-panel-2); }
+.wb-section-active { border-color: var(--wb-accent); color: var(--wb-accent); }
+.wb-section-counts { color: var(--wb-muted); font-size: 10px; }
+.wb-section-active .wb-section-counts { color: var(--wb-accent); }
+
+.wb-diag-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wb-diag {
+  background: var(--wb-bg);
+  border: none;
+  border-left: 3px solid var(--wb-border);
+  padding: 5px 8px;
+  text-align: left;
+  cursor: pointer;
+  color: var(--wb-fg);
+  font-family: inherit;
+  font-size: 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wb-diag-error { border-left-color: var(--wb-error); }
+.wb-diag-warning { border-left-color: var(--wb-warn); }
+.wb-diag-focused { outline: 2px solid var(--wb-focus); outline-offset: -2px; }
+
+.wb-diag-code { color: var(--wb-accent); font-weight: 600; }
+.wb-diag-msg { color: var(--wb-fg); }
+.wb-diag-path { color: var(--wb-muted); font-size: 10px; }
+.wb-diag-fallback-hint { color: var(--wb-warn); font-size: 10px; font-style: italic; }
+
+.wb-diag-fallback {
+  background: var(--wb-panel-2);
+  border: 1px dashed var(--wb-warn);
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--wb-warn);
+  margin-bottom: 4px;
+}
+
+.wb-empty, .wb-details-empty {
+  color: var(--wb-muted);
+  font-style: italic;
+  padding: 6px;
+}
+
+.wb-details {
+  background: var(--wb-bg);
+  border: 1px solid var(--wb-border);
+  padding: 8px;
+}
+
+.wb-details-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.wb-details-header h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.wb-kind-tag {
+  background: var(--wb-panel-2);
+  color: var(--wb-accent);
+  padding: 2px 6px;
+  font-size: 10px;
+  text-transform: uppercase;
+  border: 1px solid var(--wb-border);
+}
+
+.wb-details-fields {
+  display: grid;
+  grid-template-columns: 60px 1fr;
+  gap: 2px 8px;
+  font-size: 11px;
+  margin: 0 0 6px 0;
+}
+
+.wb-details-fields dt { color: var(--wb-muted); margin: 0; }
+.wb-details-fields dd { color: var(--wb-fg); margin: 0; word-break: break-all; }
+
+.wb-details-attrs {
+  background: var(--wb-panel-2);
+  border: 1px solid var(--wb-border);
+  padding: 6px;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow: auto;
+  max-height: 200px;
+  margin: 0;
+}
+
+.wb-normalized {
+  background: var(--wb-bg);
+  border: 1px solid var(--wb-border);
+  padding: 6px;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 240px;
+  overflow: auto;
+}
+
+/* React Flow node styling -------------------------------------------------- */
+.react-flow__node.wb-node {
+  background: var(--wb-panel-2);
+  color: var(--wb-fg);
+  border: 1px solid var(--wb-border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  font-size: 11px;
+  width: 220px;
+}
+
+.react-flow__node.wb-node-vendor { border-color: var(--wb-accent); }
+.react-flow__node.wb-node-product { border-color: var(--wb-ok); }
+.react-flow__node.wb-node-pop { border-color: var(--wb-warn); }
+.react-flow__node.wb-node-pipeline_profile { border-color: #d2a8ff; }
+.react-flow__node.wb-node-region { border-color: #ffa657; }
+.react-flow__node.wb-node-calendar { border-color: #79c0ff; }
+
+.react-flow__node.wb-node-faded { opacity: 0.25; }
+.react-flow__node.wb-node-focused {
+  outline: 2px solid var(--wb-focus);
+  outline-offset: 2px;
+}
+
+.react-flow__edge.wb-edge .react-flow__edge-path { stroke: var(--wb-muted); }
+.react-flow__edge.wb-edge-role_binding .react-flow__edge-path { stroke: var(--wb-accent); stroke-dasharray: 5 5; }
+.react-flow__edge.wb-edge-binds_profile .react-flow__edge-path { stroke: #d2a8ff; }
+.react-flow__edge.wb-edge-linked_to .react-flow__edge-path { stroke: var(--wb-warn); }
+.react-flow__edge.wb-edge-focused .react-flow__edge-path { stroke: var(--wb-focus); stroke-width: 2.5px; }
+
+/* Pipeline drill-down stage node colors */
+.react-flow__node.wb-node-pv_intent { border-color: var(--wb-accent); }
+.react-flow__node.wb-node-pv_destination { border-color: #79c0ff; }
+.react-flow__node.wb-node-pv_outgoing_intent { border-color: #d2a8ff; }
+.react-flow__node.wb-node-pv_ledger { border-color: var(--wb-ok); }
+.react-flow__node.wb-node-pv_container { border-color: #ffa657; }
+.react-flow__node.wb-node-pv_posting { border-color: #c5c5c5; }
+.react-flow__node.wb-node-pv_transfer { border-color: #ffa657; }
+.react-flow__node.wb-node-pv_fee { border-color: var(--wb-warn); }
+.react-flow__node.wb-node-pv_settlement_demand { border-color: var(--wb-error); }
+.react-flow__node.wb-node-pv_settlement_policy { border-color: #d2a8ff; }
+.react-flow__node.wb-node-pv_super {
+  border-color: var(--wb-accent);
+  border-width: 2px;
+  background: var(--wb-bg);
+  box-shadow: 0 0 0 1px rgba(88, 166, 255, 0.4);
+  cursor: zoom-in;
+}
+.react-flow__edge.wb-edge-pv_super_link .react-flow__edge-path {
+  stroke: var(--wb-accent);
+  stroke-width: 2px;
+  stroke-dasharray: 6 4;
+}
+
+.wb-edge-filters {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--wb-bg);
+  border: 1px solid var(--wb-border);
+  padding: 2px 6px;
+  margin-left: 4px;
+}
+.wb-edge-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  font-size: 11px;
+  color: var(--wb-muted);
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.wb-edge-filter input { margin: 0; }
+.wb-edge-filter:hover { color: var(--wb-fg); }
+.wb-edge-filter-on {
+  border-color: var(--wb-accent);
+  color: var(--wb-accent);
+}
+
+.wb-focus-active {
+  margin-left: 6px;
+  padding: 2px 6px;
+  background: var(--wb-panel-2);
+  border: 1px solid var(--wb-focus);
+  color: var(--wb-focus);
+  font-size: 10px;
+  letter-spacing: 0.5px;
+}
+
+/* Toolbar separators / view-mode buttons */
+.wb-toolbar-sep {
+  width: 1px;
+  background: var(--wb-border);
+  height: 22px;
+  margin: 0 4px;
+}
+.wb-btn-active {
+  border-color: var(--wb-accent) !important;
+  color: var(--wb-accent) !important;
+}
+.wb-inline-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--wb-muted);
+  font-size: 11px;
+}
+
+/* Details pane related-edges */
+.wb-related {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 6px;
+}
+.wb-related-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--wb-bg);
+  border: 1px solid var(--wb-border);
+  padding: 3px 6px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--wb-fg);
+  text-align: left;
+}
+.wb-related-row:hover { border-color: var(--wb-accent); }
+.wb-related-arrow { color: var(--wb-accent); font-weight: 700; }
+.wb-related-kind { color: var(--wb-muted); width: 110px; }
+.wb-related-target {
+  background: transparent;
+  border: none;
+  color: var(--wb-fg);
+  text-decoration: underline dotted;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 0;
+  word-break: break-all;
+}
+.wb-related-target:hover { color: var(--wb-accent); }
+
+.wb-kind-summary {
+  background: var(--wb-panel-2);
+  border: 1px solid var(--wb-border);
+  padding: 6px 8px;
+  margin-bottom: 6px;
+}
+.wb-kind-summary h4 {
+  margin: 0 0 4px 0;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--wb-accent);
+}
+
+.wb-scope-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--wb-bg);
+  border: 1px solid var(--wb-border);
+  padding: 2px 4px;
+  margin-left: 4px;
+}
+.wb-scope-label {
+  color: var(--wb-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  margin-right: 4px;
+  letter-spacing: 1px;
+}
+.wb-scope-btn {
+  background: transparent;
+  color: var(--wb-fg);
+  border: 1px solid transparent;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+}
+.wb-scope-btn:hover {
+  border-color: var(--wb-accent);
+  color: var(--wb-accent);
+}
+.wb-scope-btn-active {
+  border-color: var(--wb-accent) !important;
+  color: var(--wb-accent) !important;
+  background: var(--wb-panel-2);
+}
+.wb-scope-counts {
+  color: var(--wb-muted);
+  margin-left: 4px;
+  font-size: 10px;
+}
+
+.react-flow__edge.wb-edge-pv_cross_pipeline .react-flow__edge-path {
+  stroke: var(--wb-focus);
+  stroke-width: 2px;
+  stroke-dasharray: 7 4;
+}
+.react-flow__edge.wb-edge-pv_triggers_posting .react-flow__edge-path {
+  stroke: #c5c5c5;
+  stroke-dasharray: 4 2;
+}
+.react-flow__edge.wb-edge-pv_triggers_transfer .react-flow__edge-path {
+  stroke: #ffa657;
+  stroke-dasharray: 4 2;
+}
+
+.wb-pipeline-selector { display: flex; flex-direction: column; gap: 4px; }
+.wb-pipeline-selector select {
+  background: var(--wb-bg);
+  color: var(--wb-fg);
+  border: 1px solid var(--wb-border);
+  padding: 4px 6px;
+  font-family: inherit;
+}
+.wb-pipeline-summary { margin-top: 6px; }
+.wb-section-label {
+  color: var(--wb-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.wb-muted { color: var(--wb-muted); font-size: 10px; }
+
+/* -------------------------------------------------------------------------- *
+ * React Flow dark-theme overrides (spec 74 §Canvas controls theme).          *
+ * The default React Flow stylesheet ships light-theme controls and minimap; *
+ * without these overrides they render as bright white boxes that look like  *
+ * rendering defects on the dark canvas.                                     *
+ * -------------------------------------------------------------------------- */
+
+.react-flow {
+  background: var(--wb-bg);
+  color: var(--wb-fg);
+}
+
+/* ---- Bottom-left zoom/fit controls -------------------------------------- */
+.react-flow__controls {
+  background: var(--wb-panel);
+  border: 1px solid var(--wb-border);
+  box-shadow: none;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.react-flow__controls-button {
+  background: var(--wb-panel);
+  color: var(--wb-fg);
+  border: none;
+  border-bottom: 1px solid var(--wb-border);
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  cursor: pointer;
+}
+
+.react-flow__controls-button:last-child {
+  border-bottom: none;
+}
+
+.react-flow__controls-button:hover {
+  background: var(--wb-panel-2);
+  color: var(--wb-accent);
+}
+
+.react-flow__controls-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.react-flow__controls-button svg {
+  fill: currentColor;
+  max-width: 12px;
+  max-height: 12px;
+}
+
+/* ---- Bottom-right minimap ----------------------------------------------- */
+.react-flow__minimap {
+  background: var(--wb-panel);
+  border: 1px solid var(--wb-border);
+  border-radius: 2px;
+}
+
+.react-flow__minimap-mask {
+  fill: rgba(14, 17, 22, 0.55);            /* dim the area outside viewport */
+  stroke: var(--wb-accent);
+  stroke-width: 1.5;
+}
+
+.react-flow__minimap-node {
+  fill: var(--wb-muted);
+  stroke: none;
+}
+
+/* Use the same kind colors on minimap thumbnails as on the main canvas so
+ * supernodes / fees / vendors stay distinguishable when zoomed out. */
+.react-flow__minimap-node.wb-node-pv_super { fill: var(--wb-accent); }
+.react-flow__minimap-node.wb-node-vendor { fill: var(--wb-accent); }
+.react-flow__minimap-node.wb-node-product { fill: var(--wb-ok); }
+.react-flow__minimap-node.wb-node-pop { fill: var(--wb-warn); }
+.react-flow__minimap-node.wb-node-pipeline_profile { fill: #d2a8ff; }
+.react-flow__minimap-node.wb-node-pv_fee { fill: var(--wb-warn); }
+.react-flow__minimap-node.wb-node-pv_settlement_demand { fill: var(--wb-error); }
+.react-flow__minimap-node.wb-node-focused { stroke: var(--wb-focus); stroke-width: 2; }
+
+/* ---- Attribution + handles ---------------------------------------------- */
+.react-flow__attribution {
+  background: transparent;
+  color: var(--wb-muted);
+}
+.react-flow__attribution a {
+  color: var(--wb-muted);
+}
+
+.react-flow__handle {
+  background: var(--wb-muted);
+  border: 1px solid var(--wb-border);
+  width: 6px;
+  height: 6px;
+}
+
+/* ---- Background dots ---------------------------------------------------- */
+.react-flow__background pattern circle {
+  fill: var(--wb-border);
+}
+
+/* Selected node ring kept visible when on dark canvas. */
+.react-flow__node.selected,
+.react-flow__node:focus,
+.react-flow__node:focus-visible {
+  outline: 2px solid var(--wb-accent);
+  outline-offset: 2px;
+}

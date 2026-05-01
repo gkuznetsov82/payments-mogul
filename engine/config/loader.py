@@ -31,12 +31,22 @@ class ConfigValidationError(Exception):
 
 
 def load_config(path: str | Path) -> tuple[PrototypeConfig, list[ConfigWarning]]:
-    """Load, parse, and validate a v0 prototype config YAML.
+    """Load, parse, and validate a v0 prototype config YAML from a filesystem path.
 
     Returns (config, warnings) on success.
     Raises ConfigValidationError on any hard error.
     """
     raw = Path(path).read_text(encoding="utf-8")
+    return load_config_from_string(raw)
+
+
+def load_config_from_string(raw: str) -> tuple[PrototypeConfig, list[ConfigWarning]]:
+    """Variant of load_config that accepts an in-memory YAML document.
+
+    Used by the World Builder service to validate uploaded YAML payloads
+    through the same canonical validation rules as runtime startup, without
+    requiring filesystem materialisation. Behaviour is otherwise identical.
+    """
     try:
         data = yaml.safe_load(raw)
     except yaml.YAMLError as exc:

@@ -346,16 +346,21 @@ class SimulationEngine:
             }
         executor = self._pipeline_executor
         if action == "hold":
-            result = executor.request_hold(entity_id)
+            result = executor.request_hold(entity_type, entity_id)
         elif action == "release_hold":
-            result = executor.request_release_hold(entity_id)
+            result = executor.request_release_hold(entity_type, entity_id)
         else:  # pay_now
-            result = executor.request_pay_now(entity_id)
-        # Emit ack SSE event (spec 52 §operator_action_ack_event).
+            result = executor.request_pay_now(entity_type, entity_id)
+        # Emit ack SSE event (spec 52 §operator_action_ack_event). Payload
+        # states which key was used (target_key) and whether target resolution
+        # succeeded (target_resolved + target_invoice_id).
         ack_payload = {
             "action": action,
             "entity_type": entity_type,
             "entity_id": entity_id,
+            "target_key": result.get("target_key"),
+            "target_resolved": result.get("target_resolved", False),
+            "target_invoice_id": result.get("target_invoice_id"),
             "accepted": result.get("accepted", False),
             "entity_known": result.get("entity_known", False),
             "tick_id": self.tick_id,
@@ -369,6 +374,9 @@ class SimulationEngine:
             "action": action,
             "entity_type": entity_type,
             "entity_id": entity_id,
+            "target_key": result.get("target_key"),
+            "target_resolved": result.get("target_resolved", False),
+            "target_invoice_id": result.get("target_invoice_id"),
             "entity_known": result.get("entity_known", False),
             "rejection_reason": result.get("rejection_reason"),
             "command_scope": "world",
@@ -858,6 +866,33 @@ class SimulationEngine:
                         p["successful_transact_amount"] = self._amount_payload(
                             p["successful_transact_amount"]
                         )
+        # Spec 52 §Container balance visibility contract: include authoritative
+        # container balances in state_snapshot so Accounts/Obligations clients
+        # can render `current_balance` separately from movement-derived net
+        # diagnostics (spec 60 §View D).
+        containers_payload: list[dict] = []
+        if self._pipeline_executor is not None:
+            for entry in self._pipeline_executor.balance_store.snapshot():
+                # Resolve `agent_id` from product_id ownership for Accounts
+                # attribution (spec 52: "owner identity (agent_id where applicable)").
+                pid = entry.get("product_id", "")
+                agent_id = None
+                for vid, vendor in self.model.vendors.items():
+                    if pid in vendor.products:
+                        agent_id = vid
+                        break
+                containers_payload.append({
+                    "agent_id": agent_id,
+                    "product_id": pid,
+                    "container_ref": entry["container_ref"],
+                    "path": entry["path"],
+                    "currency": entry["currency"],
+                    "is_sink": entry["is_sink"],
+                    "current_balance": entry["current_balance"],
+                    "opening_balance": entry["opening_balance"],
+                    "scheduled_total": entry["scheduled_total"],
+                    "scheduled_count": entry["scheduled_count"],
+                })
         return {
             "tick_id": self.tick_id,
             "engine_state": self.state.value,
@@ -885,6 +920,7 @@ class SimulationEngine:
                 "amount_rounding_mode": sim.amount_rounding_mode,
                 "count_rounding_mode": sim.count_rounding_mode,
             },
+            "containers": containers_payload,
             **snap,
             "recent_outcomes": list(self._recent_outcomes[-20:]),
         }

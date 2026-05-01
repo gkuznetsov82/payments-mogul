@@ -34,6 +34,11 @@ class _Container:
     currency: str
     is_sink: bool
     current_balance: float = 0.0
+    # Spec 52 §Container balance visibility contract: authoritative opening
+    # balance is preserved (separate from current_balance) so snapshot
+    # consumers can present an authoritative current vs opening view alongside
+    # movement-derived diagnostics (spec 60 §View D).
+    opening_balance: float = 0.0
     # Pending deltas scheduled for a future value date. Applied on ticks where
     # simulation_date >= value_date. Stored as list; sorted on every append to
     # keep earliest-date promotion deterministic.
@@ -88,6 +93,7 @@ class ContainerBalanceStore:
             currency=currency,
             is_sink=is_sink,
             current_balance=float(opening_amount),
+            opening_balance=float(opening_amount),
         )
 
     # ------------------------------------------------------------------ balance ops
@@ -192,7 +198,12 @@ class ContainerBalanceStore:
     # ------------------------------------------------------------------ snapshots
 
     def snapshot(self) -> list[dict]:
-        """Return a deterministic snapshot of all container balances."""
+        """Return a deterministic snapshot of all container balances.
+
+        Spec 52 §Container balance visibility contract: payload includes
+        `current_balance` (authoritative), `opening_balance`, and
+        `scheduled_total` for Accounts/Obligations diagnostics.
+        """
         out: list[dict] = []
         for (pid, cref), c in sorted(self._containers.items()):
             out.append({
@@ -202,6 +213,7 @@ class ContainerBalanceStore:
                 "currency": c.currency,
                 "is_sink": c.is_sink,
                 "current_balance": round(c.current_balance, 6),
+                "opening_balance": round(c.opening_balance, 6),
                 "scheduled_total": round(c.scheduled_total, 6),
                 "scheduled_count": len(c.scheduled_deltas),
             })

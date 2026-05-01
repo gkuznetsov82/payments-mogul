@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from datetime import date as _date_t
-from typing import Literal, Optional
+from typing import ClassVar, Literal, Optional
 from pydantic import BaseModel, field_validator, model_validator
 
 
@@ -144,6 +144,10 @@ class PopConfig(BaseModel):
     daily_active: float
     daily_transact_count: float
     daily_transact_amount: float
+    # Spec 31 §Pop config + spec 40 §pops + ADR-0003: Pop behavior knob for
+    # refund-intent generation as a share of purchase volume. 0 disables
+    # refunds. Validated 0..1.
+    refund_to_purchase_ratio: float = 0.0
     product_links: list[ProductLinkConfig]
     # v2 foundations: optional region binding (spec 40 §world); fallback to scenario default.
     region_id: Optional[str] = None
@@ -189,6 +193,17 @@ class PopConfig(BaseModel):
     def non_negative_txn(cls, v: float) -> float:
         if v < 0:
             raise ValueError("E_TXN_PARAM_INVALID: transact params must be >= 0")
+        return v
+
+    @field_validator("refund_to_purchase_ratio")
+    @classmethod
+    def refund_ratio_unit_interval(cls, v: float) -> float:
+        """Spec 50 §Hard errors + ADR-0003 §3: refund_to_purchase_ratio is a
+        share-of-purchase Pop behavior knob and must be in [0, 1]."""
+        if not (0 <= v <= 1):
+            raise ValueError(
+                f"E_REFUND_RATIO_OUT_OF_RANGE: refund_to_purchase_ratio must be in [0, 1], got {v}"
+            )
         return v
 
 
@@ -625,8 +640,62 @@ class TransactionDestinationConfig(BaseModel):
 
 
 class TransactionIntentConfig(BaseModel):
+    """Pipeline routing/execution contract for an intent (spec 40 §pipeline).
+
+    Per ADR-0003 §2 + spec 40 §pipeline §"transaction_intents[] is a routing/
+    execution contract, not a behavior-generation contract": this object holds
+    transport contracts only. Behavior-generation fields (e.g.
+    `source_volume_ratio` or any equivalent ratio/coefficient that would
+    synthesize new economic intent families from prior outcomes) are
+    explicitly forbidden and rejected at config load with
+    `E_PIPELINE_BEHAVIOR_FIELD_FORBIDDEN`.
+
+    Refund-intent generation policy lives on Pop (`refund_to_purchase_ratio`).
+    """
+    # extra="forbid" guarantees Pydantic rejects undeclared keys; the
+    # model_validator below issues a stable, spec-aligned error code so
+    # operators see the exact policy violation rather than a generic Pydantic
+    # "extra inputs are not permitted" message.
+    model_config = {"extra": "forbid"}
+
     intent_id: str
     destinations: list[TransactionDestinationConfig] = []
+
+    # Spec 40 §pipeline + ADR-0003 §4 + spec 50 §Hard errors. Any of these
+    # key names appearing on a transaction_intents[] item is a release-blocking
+    # boundary violation: pipeline must not encode behavior-generation
+    # coefficients. The set is open-ended ("or any equivalent ratio/
+    # coefficient") so the validator runs in mode="before" and refuses any
+    # non-listed extra key, falling back to the stable code on the canonical
+    # examples too.
+    _FORBIDDEN_BEHAVIOR_FIELDS: ClassVar[tuple[str, ...]] = (
+        "source_volume_ratio",
+        # Future-proofing: equivalent coefficients that would smuggle Pop
+        # behavior into pipeline contracts. Any new spelling must be added
+        # here AND surfaced via E_PIPELINE_BEHAVIOR_FIELD_FORBIDDEN.
+        "purchase_to_refund_ratio",
+        "refund_ratio",
+        "behavior_ratio",
+        "intent_volume_ratio",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_pipeline_behavior_fields(cls, data):
+        """Spec 50 + ADR-0003 §4: pipeline `transaction_intents[]` must not
+        carry behavior-generation knobs. Surface E_PIPELINE_BEHAVIOR_FIELD_FORBIDDEN
+        for the canonical names, and also for any unknown extra key (caught by
+        extra='forbid' below if this guard misses it)."""
+        if not isinstance(data, dict):
+            return data
+        for field in cls._FORBIDDEN_BEHAVIOR_FIELDS:
+            if field in data:
+                raise ValueError(
+                    f"E_PIPELINE_BEHAVIOR_FIELD_FORBIDDEN: pipeline.transaction_intents[] "
+                    f"must not carry behavior-generation field '{field}' — Pop config "
+                    f"owns intent-generation knobs (ADR-0003)."
+                )
+        return data
 
 
 class LedgerConstructionConfig(BaseModel):

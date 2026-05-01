@@ -25,6 +25,7 @@ These validations are the minimum required to load and run `prototype_vendor_pop
 - `0 <= daily_active <= 1`.
 - `daily_transact_count >= 0`.
 - `daily_transact_amount >= 0`.
+- `0 <= refund_to_purchase_ratio <= 1`.
 - For each link, `0 <= onboarded_count <= pop_count`.
 - `onboarded_count` must be integer-valued.
 - `intake_window_ms <= tick_wall_clock_base_ms`.
@@ -35,6 +36,7 @@ These validations are the minimum required to load and run `prototype_vendor_pop
   - `0 <= min <= 1`
   - `0 <= max <= 1`
   - `min <= max`
+- Pipeline config must reject behavior-generation coefficients in `pipeline.pipeline_profiles[].transaction_intents[]` (for example `source_volume_ratio`).
 
 ### Warnings (allow run start)
 
@@ -53,6 +55,7 @@ These validations are the minimum required to load and run `prototype_vendor_pop
 - `E_POP_COUNT_INVALID`
 - `E_RATE_OUT_OF_RANGE`
 - `E_TXN_PARAM_INVALID`
+- `E_REFUND_RATIO_OUT_OF_RANGE`
 - `E_ONBOARDED_COUNT_INVALID`
 - `E_INTAKE_WINDOW_EXCEEDS_TICK_BUDGET`
 - `E_COUNT_NOT_INTEGER`
@@ -60,6 +63,7 @@ These validations are the minimum required to load and run `prototype_vendor_pop
 - `E_AMOUNT_SCALE_INVALID`
 - `E_AMOUNT_ROUNDING_MODE_INVALID`
 - `E_FRICTION_RANGE_INVALID`
+- `E_PIPELINE_BEHAVIOR_FIELD_FORBIDDEN`
 
 ## Contents (to complete)
 

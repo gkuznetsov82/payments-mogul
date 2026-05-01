@@ -8,11 +8,15 @@ build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
 
-# Node / frontend
-frontend/node_modules/
-frontend/dist/
-frontend/.vite/
+# Node / frontend (any depth — covers frontend/, world-builder-frontend/, future apps)
+**/node_modules/
+**/dist/
+**/.vite/
+**/.next/
+*.tsbuildinfo
 
 # Editors / tools
 .claude/settings.local.json
@@ -23,3 +27,6 @@ frontend/.vite/
 # OS
 .DS_Store
 Thumbs.db
+
+# Office lock files (e.g. ~$ Notes.docx)
+~$*

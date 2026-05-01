@@ -98,6 +98,9 @@ Text-first presentation remains valid, but operator workflow must include focusa
   - value-container hierarchy by owner/product/counterparty where applicable,
   - value-container movement table (transfers by container ref/path),
   - aggregate roll-ups converted to default currency for display.
+- Balance presentation requirement:
+  - Accounts must show authoritative container `current_balance` (from state/snapshot balance data) separately from movement-derived net (`movement_net`) for the selected range.
+  - Movement net is diagnostic and must not be presented as the authoritative current balance.
 - Required interactions:
   - compare-by-tick and compare-by-date modes,
   - highlight mismatches (`unmapped`, `unbalanced`),
@@ -120,6 +123,7 @@ Text-first presentation remains valid, but operator workflow must include focusa
   - selecting an agent and switching creditor/debtor perspectives must re-scope both invoice and settlement-demand lists,
   - `issued` and `received` lists must be available from both perspectives where data exists,
   - list must be vertically scrollable with consistent styling semantics used in other movement/event views (status color tags, selected-row highlight),
+  - list rows must support horizontal overflow handling (horizontal scroll or equivalent) for long IDs/details without truncating critical identifiers,
   - if no actionable entity is selected, obligation action controls must be visibly disabled.
 
 ### View F — Messages

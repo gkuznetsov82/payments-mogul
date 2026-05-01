@@ -9,15 +9,21 @@ The worker never gets a signal, so lifespan shutdown never runs and clients
 see SSE errors instead of a clean `server_shutdown` notice.
 
 This wrapper:
-  1. Starts uvicorn as a subprocess (no --reload).
+  1. Starts uvicorn as a subprocess (no --reload) for both:
+       - the simulation engine server (engine.api.server:app)
+       - the World Builder service (engine.world_builder.service:app, spec 74)
   2. Watches engine/ and configs/ for changes via `watchfiles`.
-  3. On change: POSTs /control/shutdown → the app emits server_shutdown with
-     will_restart=True, flushes the grace period, then exits.
-  4. Waits for the old process to exit, starts a fresh one.
-  5. Ctrl+C on this wrapper also triggers the graceful path.
+  3. On change:
+       - engine: POSTs /control/shutdown → emits server_shutdown with
+         will_restart=True, flushes grace period, then exits cleanly.
+       - World Builder: sends platform graceful break signal (no SSE clients
+         to notify; standalone service per spec 74 §Architecture).
+  4. Waits for the old processes to exit, starts fresh ones.
+  5. Ctrl+C on this wrapper also triggers the graceful path for both.
 
 Usage:
-    python dev.py [--port 8080] [--host 127.0.0.1]
+    python dev.py [--port 8080] [--builder-port 8090] [--host 127.0.0.1]
+    python dev.py --no-builder        # skip the World Builder service
 """
 
 from __future__ import annotations
@@ -37,6 +43,7 @@ import watchfiles
 ROOT = Path(__file__).parent
 DEFAULT_WATCH_DIRS = [ROOT / "engine", ROOT / "configs"]
 APP_TARGET = "engine.api.server:app"
+BUILDER_APP_TARGET = "engine.world_builder.service:app"
 
 # On Windows, CREATE_NEW_PROCESS_GROUP prevents the child from receiving the
 # console Ctrl+C — otherwise the uvicorn subprocess starts tearing itself down
@@ -52,9 +59,9 @@ else:
     _GRACEFUL_BREAK_SIGNAL = signal.SIGTERM
 
 
-def _uvicorn_cmd(host: str, port: int) -> list[str]:
+def _uvicorn_cmd(host: str, port: int, target: str = APP_TARGET) -> list[str]:
     return [
-        sys.executable, "-m", "uvicorn", APP_TARGET,
+        sys.executable, "-m", "uvicorn", target,
         "--host", host,
         "--port", str(port),
     ]
@@ -71,8 +78,8 @@ async def _graceful_shutdown(base_url: str, timeout: float = 3.0) -> bool:
         return False
 
 
-def _start_server(host: str, port: int) -> subprocess.Popen:
-    return subprocess.Popen(_uvicorn_cmd(host, port), **_SUBPROCESS_FLAGS)
+def _start_server(host: str, port: int, target: str = APP_TARGET) -> subprocess.Popen:
+    return subprocess.Popen(_uvicorn_cmd(host, port, target), **_SUBPROCESS_FLAGS)
 
 
 def _send_break(proc: subprocess.Popen) -> None:
@@ -104,13 +111,36 @@ def _stop_server(proc: subprocess.Popen, label: str, timeout: float = 5.0) -> No
 
 # State shared between the asyncio task and the outer cleanup (which runs
 # *outside* the cancelled asyncio scope on Ctrl+C — see main() below).
-_state: dict = {"proc": None}
+# `proc` is the engine server; `builder_proc` is the optional World Builder.
+_state: dict = {"proc": None, "builder_proc": None}
 
 
-async def _watch_and_reload(host: str, port: int, watch_dirs: list[Path]) -> None:
+def _stop_builder(proc: subprocess.Popen | None, label: str) -> None:
+    """Send graceful break to the World Builder subprocess and wait for exit.
+
+    The World Builder has no SSE clients to notify (spec 74 §Architecture: it
+    is standalone and read-first), so we don't need a `/control/shutdown`
+    round-trip — the platform graceful break signal is sufficient.
+    """
+    if proc is None or proc.poll() is not None:
+        return
+    _send_break(proc)
+    _stop_server(proc, label=label)
+
+
+async def _watch_and_reload(
+    host: str,
+    port: int,
+    builder_port: int | None,
+    watch_dirs: list[Path],
+) -> None:
     base_url = f"http://{host}:{port}"
-    _state["proc"] = _start_server(host, port)
-    print(f"[dev] uvicorn pid={_state['proc'].pid} listening on {base_url}")
+    _state["proc"] = _start_server(host, port, APP_TARGET)
+    print(f"[dev] engine    pid={_state['proc'].pid} listening on {base_url}")
+    if builder_port is not None:
+        _state["builder_proc"] = _start_server(host, builder_port, BUILDER_APP_TARGET)
+        builder_url = f"http://{host}:{builder_port}"
+        print(f"[dev] builder   pid={_state['builder_proc'].pid} listening on {builder_url}")
     print(f"[dev] watching: {', '.join(str(d.relative_to(ROOT)) for d in watch_dirs)}")
 
     async for changes in watchfiles.awatch(*[str(d) for d in watch_dirs]):
@@ -118,14 +148,21 @@ async def _watch_and_reload(host: str, port: int, watch_dirs: list[Path]) -> Non
         summary = ", ".join(changed_names)
         print(f"\n[dev] change detected ({summary}); requesting graceful shutdown")
 
+        # Engine: graceful HTTP shutdown so SSE subscribers see server_shutdown.
         ok = await _graceful_shutdown(base_url)
         if not ok:
-            print("[dev] graceful path failed; sending break signal")
+            print("[dev] engine graceful path failed; sending break signal")
             _send_break(_state["proc"])
-        _stop_server(_state["proc"], label="reload")
+        _stop_server(_state["proc"], label="engine reload")
 
-        _state["proc"] = _start_server(host, port)
-        print(f"[dev] uvicorn pid={_state['proc'].pid} restarted")
+        # World Builder: stateless service, no SSE subscribers — break signal only.
+        _stop_builder(_state.get("builder_proc"), label="builder reload")
+
+        _state["proc"] = _start_server(host, port, APP_TARGET)
+        print(f"[dev] engine    pid={_state['proc'].pid} restarted")
+        if builder_port is not None:
+            _state["builder_proc"] = _start_server(host, builder_port, BUILDER_APP_TARGET)
+            print(f"[dev] builder   pid={_state['builder_proc'].pid} restarted")
 
 
 def _run_cleanup(base_url: str) -> None:
@@ -137,27 +174,30 @@ def _run_cleanup(base_url: str) -> None:
     HTTP POST is not re-interrupted by a pending CancelledError.
     """
     proc = _state.get("proc")
-    if proc is None:
-        return
-    if proc.poll() is not None:
-        # Already exited
-        return
-    print("[dev] requesting graceful shutdown of running server...")
-    ok = False
-    try:
-        ok = asyncio.run(_graceful_shutdown(base_url))
-    except Exception as exc:
-        print(f"[dev] graceful shutdown call failed: {exc}")
-    if not ok:
-        print("[dev] graceful path failed; sending break signal")
-        _send_break(proc)
-    _stop_server(proc, label="exit")
+    if proc is not None and proc.poll() is None:
+        print("[dev] requesting graceful shutdown of engine...")
+        ok = False
+        try:
+            ok = asyncio.run(_graceful_shutdown(base_url))
+        except Exception as exc:
+            print(f"[dev] graceful shutdown call failed: {exc}")
+        if not ok:
+            print("[dev] engine graceful path failed; sending break signal")
+            _send_break(proc)
+        _stop_server(proc, label="engine exit")
+
+    _stop_builder(_state.get("builder_proc"), label="builder exit")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Graceful-reload dev server for Payments Mogul")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--port", type=int, default=8080,
+                        help="Port for the simulation engine server (default: 8080)")
+    parser.add_argument("--builder-port", type=int, default=8090,
+                        help="Port for the World Builder service (default: 8090)")
+    parser.add_argument("--no-builder", action="store_true",
+                        help="Skip starting the World Builder service")
     parser.add_argument(
         "--watch", action="append", default=None,
         help="Directory to watch (repeatable). Defaults to engine/ and configs/.",
@@ -171,9 +211,10 @@ def main() -> None:
         sys.exit(1)
 
     base_url = f"http://{args.host}:{args.port}"
+    builder_port = None if args.no_builder else args.builder_port
 
     try:
-        asyncio.run(_watch_and_reload(args.host, args.port, watch_dirs))
+        asyncio.run(_watch_and_reload(args.host, args.port, builder_port, watch_dirs))
     except KeyboardInterrupt:
         print("\n[dev] Ctrl+C received")
     except Exception as exc:

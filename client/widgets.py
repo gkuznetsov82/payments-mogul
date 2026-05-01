@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from rich.style import Style
 from textual.binding import Binding
+from textual.message import Message
 from textual.reactive import reactive
 from textual.strip import Strip
 from textual.widgets import RichLog
@@ -51,6 +52,16 @@ class SelectableRichLog(RichLog):
 
     ALLOW_SELECT = True
     can_focus = True
+
+    class LineSelected(Message):
+        """Emitted when the cursor row moves. Carries `(log_id, line_index)`
+        so the app can route to the matching detail pane (spec 60 §View B/C/D).
+        """
+
+        def __init__(self, log_id: str | None, line_index: int | None) -> None:
+            self.log_id = log_id
+            self.line_index = line_index
+            super().__init__()
 
     # Selection state. `cursor_line` is the line index the cursor is on;
     # `selection_anchor` is the other end of a shift-extended range.
@@ -216,3 +227,14 @@ class SelectableRichLog(RichLog):
         # clipboard/ack-label area and want their selection preserved. Only
         # explicit escape clears.
         pass
+
+    # Spec 60 §View B/C/D: a detail pane in the parent shows the full payload
+    # of the selected row. Post a message whenever the cursor row changes so
+    # the app can route it to the matching detail pane.
+    def watch_cursor_line(self, old: object, new: object) -> None:
+        line = new if isinstance(new, int) else None
+        try:
+            self.post_message(self.LineSelected(self.id, line))
+        except Exception:
+            # Posting can fail during early mount; safe to ignore.
+            pass

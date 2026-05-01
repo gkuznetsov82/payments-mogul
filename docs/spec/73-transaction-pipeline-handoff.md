@@ -40,6 +40,9 @@ Legend: `A` = Accountable, `R` = Responsible, `C` = Consulted.
   - Runtime-binding profile for full pipeline expansion.
   - Execution order must be deterministic and aligned to chapter `33`.
   - Promotion is approved by ADR-0002 for configs that declare `pipeline_schema_version: v3_runtime`.
+- Agency boundary (ADR-0003)
+  - Intent generation authority is Pop-owned.
+  - Pipeline is restricted to validation/routing/downstream execution and must not synthesize economic behavior intents.
 - `v4` semantic scope (prototype)
   - Routing completion semantics (`synchronous`/`asynchronous`) and root success-gating are runtime-mandatory.
   - Invoice/settlement lifecycle events are runtime-mandatory.
@@ -52,10 +55,13 @@ Legend: `A` = Accountable, `R` = Responsible, `C` = Consulted.
 ### P0 - Conformance baseline (must pass first)
 
 1. Validate all current `v1` runtime behavior still conforms to updated specs in `30`, `33`, and `40`.
-2. Report any ambiguities where implementation cannot proceed without a spec clarification.
+2. Remove any pipeline-side behavior-intent synthesis and re-home that logic to Pop classes.
+3. Report any ambiguities where implementation cannot proceed without a spec clarification.
 
 **Acceptance criteria**
 - No unapproved behavior drift from `v1` contracts.
+- No pipeline module generates economic intent families from prior outcomes.
+- Pop behavior knobs (including `refund_to_purchase_ratio`) are the sole source of refund-intent generation.
 - Written ambiguity list returned to spec owner with proposed default interpretations.
 
 ### P1 - Pipeline contract implementation (`v3_runtime` promotion scope)
@@ -112,7 +118,7 @@ Legend: `A` = Accountable, `R` = Responsible, `C` = Consulted.
    - include (a) Vendor Alpha -> Scheme settlement-demand payable flow with demand issuance in Scheme Access pipeline, and (b) Vendor Alpha 2% cardholder fee flow funding the same payment source container.
    - cardholder fee statement should be modeled as non-payable/netted advisement (no cardholder payment action).
    - demonstrate distinct `invoice_issue_date` and `payment_due_date` behavior for fee statements.
-   - ensure refund generation is source-derived (from purchase-clearing behavior), not simulated via demand-side percentage scaling.
+   - ensure refund generation is Pop-owned via `world.pops[].refund_to_purchase_ratio`, not pipeline-derived.
 
 **Acceptance criteria**
 - Root intent outcome follows declared routing completion modes deterministically.
@@ -124,6 +130,7 @@ Legend: `A` = Accountable, `R` = Responsible, `C` = Consulted.
 - Fee behavior is test-covered for bidirectional creditor/debtor directionality.
 - Settlement-demand date policies use the same policy/offset primitives as the rest of pipeline contracts.
 - Opposing purchase/refund settlement-demand flows are test-covered for natural directional netting without requiring formula-specific behavior.
+- Refund intent generation coverage proves Pop-origin generation and pipeline non-generation.
 - UI/action contract is test-covered for entity-bound actions and agent-perspective obligations views.
 - Non-payable advisement path is test-covered (`payable=false` -> no payment action exposure, informational only).
 - Balance handling is test-covered:
@@ -138,8 +145,11 @@ Legend: `A` = Accountable, `R` = Responsible, `C` = Consulted.
   - Accounts attribution matches destination ownership rather than payer-only ownership.
 - TUI operability is test-covered:
   - Obligations list scrollability + selection styling,
+  - Obligations horizontal overflow handling for long IDs/details,
+  - Accounts renders authoritative `current_balance` separately from movement-derived net,
   - message control disable/enable behavior by selected-message correlation,
   - log-row selection plus detail-pane rendering for Pipeline/Books/Accounts.
+- Release evidence includes an "Agency Boundary Audit" checklist entry (per ADR-0003).
 
 ---
 

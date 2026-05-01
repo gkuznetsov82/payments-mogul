@@ -967,19 +967,32 @@ async def test_v4_operator_action_rejects_invalid_entity_type():
 
 @pytest.mark.asyncio
 async def test_v4_opening_balances_respected_in_autopay():
-    """Opening balance drains on paid autopays; balance decreases."""
+    """Opening balances seed containers, autopays draw from them, and at least
+    one paid resolution carries a transfer_id correlation (spec 33 + spec 40)."""
     eng = _engine()
+    bs = eng._pipeline_executor.balance_store
     # Initial balance per fixture.
-    start = eng._pipeline_executor.balance_store.balance(
-        "prod_prepaid_alpha", "settlement_funds_container")
-    assert start > 0
-    # Run a handful of ticks to trigger demand autopays.
+    start_settlement = bs.balance("prod_prepaid_alpha", "settlement_funds_container")
+    start_customer = bs.balance("prod_prepaid_alpha", "customer_funds_container")
+    assert start_settlement > 0
+    assert start_customer > 0
+    # Track customer_funds debits (asset_transfer customer→settlement) — these
+    # are now balance-enforced (spec 73 §R2). Customer_funds must monotonically
+    # decrease over a run with daily purchase clearing.
+    q = eng.subscribe()
     for _ in range(10):
         await eng._run_one_tick(next_day_mode=True)
-    end = eng._pipeline_executor.balance_store.balance(
-        "prod_prepaid_alpha", "settlement_funds_container")
-    # Some outflow should have happened.
-    assert end < start
+    events = await _drain(q)
+    end_customer = bs.balance("prod_prepaid_alpha", "customer_funds_container")
+    assert end_customer < start_customer, (
+        "customer_funds should decrease as purchase clearing debits it"
+    )
+    # At least one payable demand must have settled (proving autopay drew funds).
+    paid = [e for e in events
+            if e["event"] == "settlement_resolution_event"
+            and e["data"]["final_status"] == "paid"
+            and e["data"]["transfer_id"] is not None]
+    assert paid, "expected at least one paid resolution backed by a transfer"
 
 
 @pytest.mark.asyncio
@@ -1041,6 +1054,424 @@ async def test_v4_opening_balance_negative_rejected_for_non_sink(tmp_path):
     with pytest.raises(ConfigValidationError) as exc:
         load_config(_write_tmp(tmp_path, data))
     assert exc.value.code == "E_OPENING_BALANCE_NEGATIVE_FOR_NON_SINK"
+
+
+# ----------------------------------------------------------------
+# Spec 73 v4 remediation deltas (R1-R4): refund derivation, transfer balance
+# enforcement + ownership fields, action target by demand_id.
+# ----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_v4_refund_intent_is_pop_derived_at_configured_ratio():
+    """ADR-0003 + spec 31 §Pop methods: refund volume comes from Pop's
+    `refund_to_purchase_ratio`, applied inside `Pop.Transact()`. The
+    pipeline routes Pop-emitted intents 1:1, so the refund routed intent's
+    amount must be ~ratio × purchase routed intent's amount."""
+    eng = _engine()
+    q = eng.subscribe()
+    await eng._run_one_tick(next_day_mode=True)
+    events = await _drain(q)
+    intents = [e["data"] for e in events if e["event"] == "transaction_intent_event"
+               and e["data"].get("intent_stage") == "routed_outgoing"]
+    purchase_scheme = next(i for i in intents
+                            if i["intent_id"] == "Transact-Purchase-Clearing-Scheme")
+    refund_scheme = next(i for i in intents
+                          if i["intent_id"] == "Transact-Purchase-Refund-Scheme")
+    purchase_amt = float(purchase_scheme["amount"]["amount"])
+    refund_amt = float(refund_scheme["amount"]["amount"])
+    assert refund_amt > 0
+    assert abs(refund_amt - 0.01 * purchase_amt) < 1.0, (
+        f"refund ({refund_amt:.2f}) should be ~1% of purchase ({purchase_amt:.2f})"
+    )
+    purchase_count = int(purchase_scheme["txn_count"])
+    refund_count = int(refund_scheme["txn_count"])
+    assert refund_count <= purchase_count
+
+
+@pytest.mark.asyncio
+async def test_v4_pop_zero_refund_ratio_emits_no_refund_intents(tmp_path):
+    """ADR-0003: when Pop's `refund_to_purchase_ratio` is 0, Pop must not
+    emit refund-kind outcomes; the pipeline therefore has no refund intent
+    to route. Pipeline never synthesizes refunds on its own."""
+    data = _yaml_data()
+    data["world"]["pops"][0]["refund_to_purchase_ratio"] = 0
+    cfg, _ = load_config(_write_tmp(tmp_path, data))
+    eng = SimulationEngine(cfg, config_path=FIXTURE)
+    eng.state_from_idle()
+    q = eng.subscribe()
+    await eng._run_one_tick(next_day_mode=True)
+    events = await _drain(q)
+    intents = [e["data"] for e in events if e["event"] == "transaction_intent_event"]
+    refund_intents = [i for i in intents
+                      if "Refund" in i["intent_id"]]
+    assert refund_intents == [], (
+        "Pop ratio=0 must yield zero refund intents; pipeline must NOT synthesize"
+    )
+
+
+@pytest.mark.asyncio
+async def test_v4_pipeline_source_volume_ratio_field_rejected(tmp_path):
+    """ADR-0003 §4 + spec 50: pipeline `transaction_intents[]` must reject
+    behavior-generation fields with E_PIPELINE_BEHAVIOR_FIELD_FORBIDDEN."""
+    data = _yaml_data()
+    data["pipeline"]["pipeline_profiles"][0]["transaction_intents"][1]["source_volume_ratio"] = 0.5
+    with pytest.raises(ConfigValidationError) as exc:
+        load_config(_write_tmp(tmp_path, data))
+    assert exc.value.code == "E_PIPELINE_BEHAVIOR_FIELD_FORBIDDEN"
+
+
+@pytest.mark.asyncio
+async def test_v4_pop_refund_ratio_out_of_range_rejected(tmp_path):
+    """Spec 50: `refund_to_purchase_ratio` must be in [0, 1]; out-of-range
+    fails config load with `E_REFUND_RATIO_OUT_OF_RANGE`."""
+    data = _yaml_data()
+    data["world"]["pops"][0]["refund_to_purchase_ratio"] = 1.5
+    with pytest.raises(ConfigValidationError) as exc:
+        load_config(_write_tmp(tmp_path, data))
+    assert exc.value.code == "E_REFUND_RATIO_OUT_OF_RANGE"
+
+    data2 = _yaml_data()
+    data2["world"]["pops"][0]["refund_to_purchase_ratio"] = -0.1
+    with pytest.raises(ConfigValidationError) as exc:
+        load_config(_write_tmp(tmp_path, data2))
+    assert exc.value.code == "E_REFUND_RATIO_OUT_OF_RANGE"
+
+
+# ---- R2: transfer balance enforcement ---------------------------------------
+
+@pytest.mark.asyncio
+async def test_v4_non_payment_transfer_emits_failed_when_insufficient_funds(tmp_path):
+    """Spec 73 §R2 + spec 52 §value_transfer_event: non-payment asset_transfer
+    (customer→settlement) honors balance constraints. With customer_funds open
+    at $0 the transfer must fail with reason and not mutate balances."""
+    data = _yaml_data()
+    alpha = data["world"]["vendor_agents"][0]
+    alpha["products"][0]["pipeline_role_bindings"]["value_container_balances"] = [
+        {"container_ref": "settlement_funds_container", "opening_amount": 0,
+         "currency": "USD"},
+        {"container_ref": "customer_funds_container", "opening_amount": 0,
+         "currency": "USD"},
+    ]
+    import tempfile, os, pathlib
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tf:
+        pyyaml.safe_dump(data, tf)
+        path = pathlib.Path(tf.name)
+    try:
+        cfg, _ = load_config(path)
+        eng = SimulationEngine(cfg, config_path=path)
+        eng.state_from_idle()
+        bs = eng._pipeline_executor.balance_store
+        opening_settlement = bs.balance("prod_prepaid_alpha", "settlement_funds_container")
+        opening_customer = bs.balance("prod_prepaid_alpha", "customer_funds_container")
+        q = eng.subscribe()
+        await eng._run_one_tick(next_day_mode=True)
+        events = await _drain(q)
+        # Look for the asset-transfer (purchase clearing) — should be failed.
+        purchase_transfers = [e["data"] for e in events
+                              if e["event"] == "value_transfer_event"
+                              and e["data"]["trigger_id"] == "Transact-Purchase-Clearing"]
+        assert purchase_transfers, "expected a transfer attempt for purchase clearing"
+        failed = [t for t in purchase_transfers if t["status"] == "failed"]
+        assert failed, "expected at least one failed transfer (insufficient funds)"
+        assert failed[0]["reason_code"] in ("INSUFFICIENT_FUNDS", "INSUFFICIENT_FUNDS_PROJECTED")
+        # Spec 73 §R2: failed attempt must not mutate balances.
+        assert bs.balance("prod_prepaid_alpha", "settlement_funds_container") == opening_settlement
+        assert bs.balance("prod_prepaid_alpha", "customer_funds_container") == opening_customer
+    finally:
+        os.unlink(path)
+
+
+# ---- R3: transfer ownership observability -----------------------------------
+
+@pytest.mark.asyncio
+async def test_v4_transfer_event_includes_source_and_destination_ownership():
+    """Spec 52 §value_transfer_event + spec 73 §R3: transfers carry both
+    source and destination product/agent ids so Accounts attributes correctly."""
+    eng = _engine()
+    q = eng.subscribe()
+    await eng._run_one_tick(next_day_mode=True)
+    events = await _drain(q)
+    transfers = [e["data"] for e in events if e["event"] == "value_transfer_event"]
+    assert transfers
+    for t in transfers:
+        # All transfers must surface ownership fields.
+        assert "source_product_id" in t
+        assert "destination_product_id" in t
+        assert "source_agent_id" in t
+        assert "destination_agent_id" in t
+        # Source product is non-empty for any executed transfer.
+        if t["status"] == "executed":
+            assert t["source_product_id"]
+            assert t["destination_product_id"]
+
+
+@pytest.mark.asyncio
+async def test_v4_payment_transfer_attributes_to_creditor_destination():
+    """Spec 73 §R3 acceptance: payment transfer's destination_product_id is
+    the creditor's product (not the payer's), so Accounts attribution is right."""
+    eng = _engine()
+    q = eng.subscribe()
+    # Run until at least one payable settlement_resolution fires.
+    paid_transfer = None
+    for _ in range(15):
+        await eng._run_one_tick(next_day_mode=True)
+        evs = await _drain(q)
+        for ev in evs:
+            if ev["event"] == "value_transfer_event":
+                t = ev["data"]
+                # Payment transfers carry the invoice id as trigger.
+                if t["trigger_id"].startswith("inv_") and t["status"] == "executed":
+                    paid_transfer = t
+                    break
+        if paid_transfer:
+            break
+    assert paid_transfer, "expected a paid payment transfer within 15 ticks"
+    # Source = payer (alpha); destination = creditor (scheme for purchase demand).
+    assert paid_transfer["source_agent_id"] == "vendor_alpha"
+    assert paid_transfer["destination_agent_id"] in ("vendor_scheme", "vendor_processor")
+    assert paid_transfer["source_product_id"] != paid_transfer["destination_product_id"]
+
+
+# ---- R4: action targeting by invoice_id OR settlement_demand_id ------------
+
+@pytest.mark.asyncio
+async def test_v4_action_target_resolution_by_settlement_demand_id():
+    """Spec 73 §R4: hold/release_hold/pay_now resolve by settlement_demand_id
+    too. Ack states target_key='settlement_demand_id' + target_invoice_id."""
+    eng = _engine()
+    q = eng.subscribe()
+    # Let demand invoices accrue + emit.
+    for _ in range(3):
+        await eng._run_one_tick(next_day_mode=True)
+    await _drain(q)
+    open_payables = eng._pipeline_executor._open_payables
+    demand_payables = [p for p in open_payables.values()
+                       if p.invoice_category == "settlement_demand"]
+    assert demand_payables, "expected at least one demand-category payable"
+    payable = demand_payables[0]
+    # The component demand id may differ from settlement_demand_id (representative).
+    target_demand_id = (payable.component_settlement_demand_ids[0]
+                        if payable.component_settlement_demand_ids
+                        else payable.settlement_demand_id)
+    result = await eng.submit_operator_action("hold", "settlement_demand", target_demand_id)
+    assert result["accepted"] is True
+    assert result["target_key"] == "settlement_demand_id"
+    assert result["target_resolved"] is True
+    assert result["target_invoice_id"] == payable.invoice_id
+    # Hold was applied via target_invoice_id.
+    assert payable.invoice_id in eng._pipeline_executor._holds
+
+
+@pytest.mark.asyncio
+async def test_v4_action_target_resolution_unknown_demand_id():
+    """Unknown settlement_demand_id must not resolve; ack states the rejection."""
+    eng = _engine()
+    result = await eng.submit_operator_action("hold", "settlement_demand", "no-such-demand")
+    assert result["accepted"] is False
+    assert result["target_key"] == "settlement_demand_id"
+    assert result["target_resolved"] is False
+    assert result["target_invoice_id"] is None
+    assert result["rejection_reason"] == "entity_not_open"
+
+
+@pytest.mark.asyncio
+async def test_v4_action_target_resolution_invoice_id_carries_target_key():
+    """Resolution by invoice_id preserves target_key='invoice_id' in ack."""
+    eng = _engine()
+    q = eng.subscribe()
+    for _ in range(3):
+        await eng._run_one_tick(next_day_mode=True)
+    await _drain(q)
+    payable = next(iter(eng._pipeline_executor._open_payables.values()))
+    result = await eng.submit_operator_action("pay_now", "invoice", payable.invoice_id)
+    assert result["accepted"] is True
+    assert result["target_key"] == "invoice_id"
+    assert result["target_invoice_id"] == payable.invoice_id
+
+
+# ----------------------------------------------------------------
+# RR1: snapshot container-balance payload (spec 52 §Container balance
+# visibility contract + spec 60 §View D).
+# ----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_v4_snapshot_includes_authoritative_container_balances():
+    """Spec 52 §Container balance visibility contract: state_snapshot
+    includes a `containers` block with `current_balance`, `opening_balance`,
+    `scheduled_total`, `agent_id`, `product_id`, `container_ref` per entry."""
+    eng = _engine()
+    snap = eng.build_snapshot()
+    containers = snap.get("containers")
+    assert containers is not None and isinstance(containers, list)
+    assert containers, "expected at least one container in fixtures"
+    sample = containers[0]
+    for required in ("agent_id", "product_id", "container_ref",
+                     "current_balance", "opening_balance",
+                     "scheduled_total", "currency"):
+        assert required in sample, f"missing {required} in {sample}"
+    # vendor_alpha's settlement_funds_container is opened at 1M (test fixture).
+    by_key = {(c["product_id"], c["container_ref"]): c for c in containers}
+    alpha_settlement = by_key.get(("prod_prepaid_alpha", "settlement_funds_container"))
+    assert alpha_settlement is not None
+    assert alpha_settlement["agent_id"] == "vendor_alpha"
+    assert alpha_settlement["opening_balance"] == 1000000.0
+    assert alpha_settlement["current_balance"] == 1000000.0
+
+
+@pytest.mark.asyncio
+async def test_v4_snapshot_balance_diverges_from_movement_after_autopay():
+    """Spec 60 §View D: `current_balance` is authoritative; after autopay
+    drains, current_balance reflects the new authoritative state."""
+    eng = _engine()
+    bs = eng._pipeline_executor.balance_store
+    opening = bs.balance("prod_prepaid_alpha", "settlement_funds_container")
+    # Pump enough ticks to make at least one demand autopay fire.
+    for _ in range(10):
+        await eng._run_one_tick(next_day_mode=True)
+    snap = eng.build_snapshot()
+    containers = {(c["product_id"], c["container_ref"]): c
+                  for c in snap.get("containers", [])}
+    alpha_settlement = containers[("prod_prepaid_alpha", "settlement_funds_container")]
+    # Authoritative balance reflects net of all applied deltas.
+    assert alpha_settlement["current_balance"] == bs.balance(
+        "prod_prepaid_alpha", "settlement_funds_container"
+    )
+    # Opening balance is preserved separately for diagnostics.
+    assert alpha_settlement["opening_balance"] == opening
+
+
+@pytest.mark.asyncio
+async def test_v4_snapshot_sink_container_balance_negative_allowed():
+    """Sink products allow negative current_balance; non-sink reflects ≥0."""
+    eng = _engine()
+    for _ in range(5):
+        await eng._run_one_tick(next_day_mode=True)
+    snap = eng.build_snapshot()
+    by_key = {(c["product_id"], c["container_ref"]): c
+              for c in snap.get("containers", [])}
+    # Scheme is a SinkProduct.
+    scheme = by_key.get(("prod_scheme_access", "scheme_settlement_container"))
+    assert scheme is not None
+    assert scheme["is_sink"] is True
+    # Non-sink Alpha settlement container must remain ≥ 0.
+    alpha_settlement = by_key[("prod_prepaid_alpha", "settlement_funds_container")]
+    assert alpha_settlement["is_sink"] is False
+    assert alpha_settlement["current_balance"] >= 0
+
+
+# ----------------------------------------------------------------
+# ADR-0003: Agency Boundary tests (Pop is sole intent generator;
+# pipeline never synthesizes economic intents from outcomes).
+# ----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_adr0003_pop_emits_two_outcomes_per_active_link_when_ratio_positive():
+    """Spec 31 §Pop.Transact + ADR-0003 §3: with a non-zero refund ratio Pop
+    emits TWO Transact outcomes per active link per tick — one
+    intent_kind=purchase, one intent_kind=refund. Ratio reflects in the
+    refund outcome's economic payload."""
+    eng = _engine()
+    # Run far enough to get past the onboarding tick where active stock = 0.
+    for _ in range(2):
+        await eng._run_one_tick(next_day_mode=True)
+    snap = eng.build_snapshot()
+    outcomes = snap["recent_outcomes"]
+    transact_outcomes = [o for o in outcomes if o["action_type"] == "Transact"]
+    purchase = [o for o in transact_outcomes if o["intent_kind"] == "purchase"]
+    refund = [o for o in transact_outcomes if o["intent_kind"] == "refund"]
+    assert purchase, "Pop must emit a purchase outcome"
+    assert refund, "Pop must emit a refund outcome when ratio > 0"
+    # Refund volume should equal ratio × purchase volume per Pop logic.
+    def _amt(v):
+        return float(v["amount"]) if isinstance(v, dict) else float(v)
+    p_amt = _amt(purchase[0]["successful_total_amount"])
+    r_amt = _amt(refund[0]["successful_total_amount"])
+    assert r_amt > 0
+    assert abs(r_amt - 0.01 * p_amt) < 1.0
+
+
+@pytest.mark.asyncio
+async def test_adr0003_pop_emits_only_purchase_when_ratio_zero(tmp_path):
+    """Pop ratio=0 → no refund outcome emitted; pipeline cannot fabricate one."""
+    data = _yaml_data()
+    data["world"]["pops"][0]["refund_to_purchase_ratio"] = 0.0
+    cfg, _ = load_config(_write_tmp(tmp_path, data))
+    eng = SimulationEngine(cfg, config_path=FIXTURE)
+    eng.state_from_idle()
+    for _ in range(2):
+        await eng._run_one_tick(next_day_mode=True)
+    snap = eng.build_snapshot()
+    transact_outcomes = [o for o in snap["recent_outcomes"]
+                         if o["action_type"] == "Transact"]
+    refund = [o for o in transact_outcomes if o["intent_kind"] == "refund"]
+    assert refund == [], (
+        "Pop must NOT emit refund outcomes when ratio=0; "
+        "pipeline must NOT synthesize them either."
+    )
+
+
+def test_adr0003_static_boundary_pipeline_executor_has_no_intent_synthesis():
+    """ADR-0003 §Audit static boundary check: scan the pipeline executor for
+    behavior-generation tokens that would indicate intent synthesis."""
+    import pathlib
+    src = pathlib.Path("engine/pipeline/executor.py").read_text(encoding="utf-8")
+    forbidden_tokens = (
+        "source_volume_ratio",
+        "refund_to_purchase_ratio",      # Pop-only knob; pipeline must not read it
+        "purchase_to_refund_ratio",
+        "behavior_ratio",
+    )
+    for token in forbidden_tokens:
+        assert token not in src, (
+            f"ADR-0003 boundary violation: pipeline executor references '{token}'"
+        )
+
+
+def test_adr0003_static_boundary_pipeline_models_forbid_behavior_fields():
+    """ADR-0003 §Audit config check: TransactionIntentConfig must declare
+    extra='forbid' AND list canonical forbidden behavior-generation fields."""
+    from engine.config.models import TransactionIntentConfig
+    assert TransactionIntentConfig.model_config.get("extra") == "forbid"
+    assert "source_volume_ratio" in TransactionIntentConfig._FORBIDDEN_BEHAVIOR_FIELDS
+
+
+def test_adr0003_pipeline_intent_cfg_rejects_arbitrary_extra_keys(tmp_path):
+    """Defense in depth: even unknown extra keys on transaction_intents[]
+    must be rejected (extra='forbid'), preventing future drift via novel
+    behavior-knob spellings."""
+    data = _yaml_data()
+    data["pipeline"]["pipeline_profiles"][0]["transaction_intents"][0]["my_unknown_behavior_knob"] = 0.42
+    with pytest.raises(ConfigValidationError):
+        load_config(_write_tmp(tmp_path, data))
+
+
+@pytest.mark.asyncio
+async def test_adr0003_determinism_pop_owned_refund():
+    """ADR-0003 must preserve determinism: identical seed/config/inputs
+    produce identical outcomes (incl. purchase + refund split)."""
+    async def run() -> list[tuple]:
+        eng = _engine()
+        q = eng.subscribe()
+        for _ in range(3):
+            await eng._run_one_tick(next_day_mode=True)
+        events = await _drain(q)
+        sig: list[tuple] = []
+        for e in events:
+            if e["event"] == "transaction_intent_event":
+                d = e["data"]
+                sig.append((
+                    d.get("tick_id"),
+                    d.get("intent_id"),
+                    d.get("intent_stage"),
+                    str(d.get("amount")),
+                ))
+        return sig
+    a = await run()
+    b = await run()
+    assert a == b, "Pop-owned refund derivation must be deterministic"
 
 
 # ---------------------------------------------------------------- SQLite store

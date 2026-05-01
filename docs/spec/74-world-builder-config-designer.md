@@ -52,7 +52,7 @@ Immediate need:
 
 Use a **thin web UI + builder backend service** architecture:
 
-- `world-builder-ui` (React) is responsible for authoring surface, visualization, and export UX.
+- `world-builder-ui` (**React**) is responsible for authoring surface, visualization, and export UX.
 - `world-builder-service` (FastAPI) is responsible for YAML parsing, validation, normalization, and resolver output.
 - Validation/normalization is authoritative on the service side (not client-side).
 
@@ -103,6 +103,17 @@ The World Builder service provides at minimum:
     - entities (`vendor`, `product`, `pop`, `region`, `calendar`, pipeline profile),
     - references/edges (`product_links`, profile bindings, role resolutions),
     - unresolved-reference annotations.
+  - Output should additionally support additive drill-down payloads when available:
+    - `pipeline_views` (per-profile pipeline stage/interconnection model),
+    - graph-target hints for diagnostics (`node_id`, optional `edge_id`, optional `graph_view`).
+  - Output must support aggregate + cross-pipeline context:
+    - `pipeline_scope_views` including:
+      - `all_profiles` aggregate view,
+      - per-profile drill-down views,
+    - cross-pipeline edges with target-navigation metadata:
+      - `target_instance_id`,
+      - `target_profile_id`,
+      - `target_node_id`.
 
 Implementation route naming may vary, but these capabilities are mandatory.
 
@@ -126,6 +137,49 @@ World Builder UI must provide at least the following visual views:
 
 For `v0_viewer`, these views are read-first; direct graph editing is not required.
 
+### Visualization interaction minimums (`v0_viewer`, mandatory)
+
+- Graph view **must** be an interactive node-edge canvas (not a text-only node/edge list).
+- Graph view **must** support:
+  - pan and zoom,
+  - node selection,
+  - edge selection,
+  - fit-to-view/reset camera control,
+  - user node repositioning (drag to rearrange),
+  - explicit reset back to deterministic auto-layout after manual rearrangement.
+- Selecting a node or edge **must** open a details pane showing at least:
+  - stable ID,
+  - kind,
+  - label (for nodes),
+  - attribute payload (`attrs`) emitted by analysis model.
+- Diagnostics panel **must** support click-to-focus:
+  - selecting a diagnostic centers/highlights related graph elements when resolvable,
+  - unresolved diagnostics remain visible with explicit "no graph target" indication.
+- Config structure navigator **must** filter/highlight graph and diagnostics by selected section.
+- UI implementation for `v0_viewer` **must** use React-based composition, consistent with stack constraints.
+- Visualization must provide at least two read-only exploration modes:
+  - `Topology` mode for world-entity relationships,
+  - `Pipeline` mode for per-profile stage/interconnection drill-down.
+- Pipeline mode **must** allow selecting a profile and inspecting stage-level connectivity (not role links only).
+- Pipeline mode **must** expose scope explicitly and prominently:
+  - `All profiles (aggregate)` scope,
+  - individual profile scope.
+- Active pipeline scope must be visible without relying on side-pane discovery.
+- Cross-pipeline relationships (role-resolved route/payment/trigger paths) must be represented in aggregate pipeline scope.
+- Cross-pipeline edges must be clickable and support jump-to-target navigation.
+- Default auto-layout must use established hierarchical graph optimization with crossing minimization (for example ELK layered or equivalent), not only fixed lane snap post-processing.
+- Visualization must implement progressive disclosure so dense graphs remain readable:
+  - collapsed aggregate/supernode view by default for pipeline scope,
+  - expand-on-demand to stage-level internals,
+  - edge-class visibility controls (for example route/trigger/posting/transfer/cross-pipeline),
+  - focus neighborhood mode (k-hop) around selected node.
+- Visualization should support hybrid layout behavior:
+  - deterministic global auto-layout for full-graph baseline readability,
+  - local mindmap-style focus layout (for example radial around selected node) for exploration.
+- Focus layout must preserve orientation cues to avoid disorientation (for example keeping major upstream/downstream flow direction visible).
+- Layout must preserve mental map across common interactions (scope/filter switch, expand/collapse, re-analyze of same structure), avoiding full random reflow.
+- Graph controls and minimap must follow dark theme styling; default bright/white control chrome is non-conformant.
+
 ---
 
 ## UX and workflow requirements
@@ -133,6 +187,9 @@ For `v0_viewer`, these views are read-first; direct graph editing is not require
 - User can load YAML from local disk.
 - User can run validate and normalize without starting simulation runtime.
 - User can inspect reference topology even when some diagnostics are present.
+- User can manually rearrange node positions to improve readability, then restore default layout.
+- User can understand current pipeline scope at a glance (aggregate vs specific profile).
+- User can traverse from one pipeline context to another via clickable cross-pipeline edges.
 - User can export normalized YAML back to local disk.
 - Diagnostic state is explicit: validation pass/fail is always visible.
 
@@ -181,6 +238,20 @@ Failure behavior:
 - Topology view shows all key entity classes and references from input.
 - Unresolved references are visible in both diagnostics and graph context.
 - Exported normalized YAML is suitable for runtime usage without manual cleanup.
+- Graph rendering is interactive (pan/zoom/select), not text-list-only.
+- Graph supports manual node rearrangement and deterministic layout reset.
+- Clicking a diagnostic attempts graph focus/highlight and surfaces a deterministic fallback state when no target exists.
+- Using `tests/fixtures/v3_pipeline_full.yaml`, user can visually trace at least one `pop -> product_link -> product -> pipeline_profile` chain in UI.
+- Pipeline drill-down mode exists and shows stage/interconnection context for selected pipeline profile.
+- Details pane surfaces sufficient metadata to understand selected element without opening YAML for common inspection tasks.
+- Pipeline aggregate scope is available and includes artifacts from all profiles in the config.
+- Posting and transfer rules are traceable from triggers to rule nodes to ledger/container endpoints.
+- Cross-pipeline links are visible and clickable, and jump-to-target lands on target context/node details.
+- Default aggregate pipeline view for `configs/prototype_v3_runtime_example.yaml` is interpretable without manual dragging.
+- Users can isolate to local context (focus neighborhood and/or edge-class filters) within <= 3 interactions from a selected node.
+- Expand/collapse and scope-switch interactions preserve mental-map continuity (no disorienting full-canvas re-randomization for unchanged subgraphs).
+- Focus mode provides an explorable local layout (mindmap-style/radial acceptable) that is visibly less tangled than full-graph baseline for selected-node exploration.
+- Minimap and graph controls are legible and visually integrated with dark theme (no white-box artifact appearance).
 
 ---
 
